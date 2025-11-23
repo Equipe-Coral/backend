@@ -3,7 +3,6 @@ from src.agents.detective import DetectiveAgent
 from src.services.similarity_service import SimilarityService
 from src.services.embedding_service import EmbeddingService
 from src.core.state_manager import ConversationStateManager
-from src.services.camara_api import MultiSourceLegislativeAPI
 from sqlalchemy.orm import Session
 import logging
 
@@ -18,92 +17,88 @@ async def handle_question(
     db: Session
 ) -> str:
     """
-    Process user questions about legislation with IMPROVED search logic
+    Processa dúvidas do usuário buscando legislação via Gemini (DetectiveAgent).
     """
 
-    # Instancia diretamente a API multi-source corrigida
-    # (Assumindo que DetectiveAgent usava ela internamente, mas vamos usar direto aqui para garantir controle)
-    legislative_api = MultiSourceLegislativeAPI()
-    similarity_service = SimilarityService()
+    # Instancia os serviços
+    detective = DetectiveAgent()
     embedding_service = EmbeddingService()
     state_manager = ConversationStateManager()
 
     theme = classification.get('theme', 'outros')
     raw_keywords = classification.get('keywords', [])
 
-    # Extração de keywords manual mais segura se a do LLM falhar
-    # Se o texto for curto, adiciona palavras do texto também
+    # Preparar keywords
     search_keywords = list(raw_keywords)
     if len(text.split()) < 10:
         search_keywords.extend([w for w in text.split() if len(w) > 3])
-    
-    # Remove duplicatas preservando ordem
     search_keywords = list(dict.fromkeys(search_keywords))
 
-    logger.info(f"❓ Processing question for user {user_id}: theme={theme}, search_keywords={search_keywords}")
+    logger.info(f"❓ Processing question for user {user_id}: theme={theme}")
 
     try:
-        # 1. Search for legislation (Scope 3 = Federal/Broad)
-        pls = await legislative_api.search_relevant_legislation(
-            keywords=search_keywords,
-            scope=3,
-            location=user_location,
+        # 1. Buscar legislação usando o Detective (agora via Gemini)
+        pls = await detective.find_related_pls(
             theme=theme,
-            limit=5 # Pega top 5
+            keywords=search_keywords,
+            db=db,
+            scope_level=3, # Macro/Federal
+            location=user_location,
+            user_message=text
         )
 
-        # 2. Check similar demands (Community)
-        embedding = await embedding_service.generate_embedding(text)
-        similar_demands = []
-        if embedding:
-            # ... (código de similaridade mantido igual) ...
-            pass # (Simplifiquei aqui para focar no erro das PLs, mantenha a logica original de similarity)
-
-        # === BUILD RESPONSE ===
+        # === CONSTRUIR RESPOSTA ===
         response = ""
-        response += f"🔍 *Busquei informações sobre: {', '.join(search_keywords[:3])}*\n\n"
+        response += f"🔍 *Busquei informações sobre: {theme.replace('_', ' ').title()}*\n\n"
 
-        # 1. Show Legislation
+        # 1. Mostrar Legislação
         if pls:
-            response += f"📜 *Encontrei {len(pls)} projeto(s) ou leis relacionados:*\n\n"
+            response += f"📜 *Encontrei {len(pls)} leis ou projetos relacionados:*\n\n"
 
             for pl in pls:
-                # Add source indicator
-                icon = "🏛️" if "Senado" in pl.get('source', '') else "🏢"
+                # Ícone baseado na fonte
+                icon = "🏛️"
+                if "Senado" in pl.get('source', ''): icon = "🏢"
+                elif "Municipal" in pl.get('source', ''): icon = "🏡"
                 
                 # Título e Link
-                response += f"{icon} *[{pl['title']}]({pl.get('url', '#')})*\n"
-
-                # Ementa limpa
-                ementa = pl.get('description', '')
-                if len(ementa) > 180:
-                    ementa = ementa[:177] + "..."
+                url = pl.get('url') or '#'
+                response += f"{icon} *[{pl['title']}]({url})*\n"
                 
-                response += f"_{ementa}_\n"
+                # Descrição concisa
+                summary = pl.get('summary') or pl.get('ementa', '')
+                response += f"_{summary}_\n"
 
-                # Status/Ano
-                year = pl.get('year') or pl.get('date', '')[:4]
-                response += f"📅 Ano: {year} | 📍 {pl.get('source', 'Fonte Oficial')}\n\n"
+                # Status
+                status = pl.get('status', 'Ativo')
+                response += f"📊 Status: {status}\n\n"
 
-            response += "---\n\n"
+            # REMOVIDO: response += "---\n" (O traço foi retirado)
+            response += "\n" # Apenas um espaço extra
         else:
-            # Fallback message
             response += _build_no_legislation_message(theme, search_keywords)
-            response += "\n---\n\n"
+            # REMOVIDO: response += "\n---\n" (O traço foi retirado)
+            response += "\n\n"
 
-        # ... (Resto da lógica de botões e estado mantida igual) ...
-        response += "*O que deseja fazer?*\n"
-        response += "1️⃣ Criar nova demanda\n"
-        response += "2️⃣ Apoiar demandas existentes"
+        # 2. Botões de Ação com Explicação
+        response += "*O que deseja fazer?*\n\n"
+        
+        response += "1️⃣ *Criar nova demanda sobre isso*\n"
+        response += "_(Para registrar o problema e iniciar uma mobilização)_\n\n"
+        
+        response += "2️⃣ *Apoiar demandas existentes*\n"
+        response += "_(Para fortalecer pedidos já feitos pela comunidade)_"
 
-        # Save State
+        # Salvar Estado
         state_manager.set_state(
             phone=phone,
             stage="choosing_demand_action_after_question",
             context={
                 "theme": theme,
                 "classification": classification,
-                "found_pls": len(pls) > 0
+                "found_pls": len(pls) > 0,
+                "original_question": text,
+                "keywords": search_keywords
             },
             db=db
         )
@@ -112,11 +107,10 @@ async def handle_question(
 
     except Exception as e:
         logger.error(f"❌ Error handling question: {e}", exc_info=True)
-        return "❌ Desculpe, tive um problema técnico ao buscar na base do governo. Tente novamente."
+        return "❌ Desculpe, tive um problema técnico ao analisar sua dúvida. Tente novamente."
 
     finally:
-        await legislative_api.close_all()
+        await detective.close()
 
 def _build_no_legislation_message(theme: str, keywords: List[str]) -> str:
-    # (Mantido igual ao seu original, que estava bom)
-    return "📚 *Não encontrei leis federais exatas sobre isso recentemente.*\n⚠️ O tema pode ser regulado por leis municipais ou regras específicas do estabelecimento."
+    return "📚 *Não encontrei leis específicas sobre isso no momento.*\n⚠️ O tema pode ser muito recente ou regulado por normas locais."
