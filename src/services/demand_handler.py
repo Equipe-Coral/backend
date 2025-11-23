@@ -81,14 +81,14 @@ async def handle_problem_confirmation(
 ) -> str:
     """
     Processa a confirmação do entendimento do problema.
-    Se confirmado → pergunta se quer criar demanda
+    Se confirmado → procede com criação (pulando step redundante se veio de question flow)
     Se não confirmado → pede para reformular
     """
 
     state_manager = ConversationStateManager()
     confirmation_lower = confirmation_text.lower().strip()
 
-    # Confirmação POSITIVA - expandida com mais variações
+    # Confirmação POSITIVA
     positive_keywords = [
         'sim', 's', 'yes', 'y', 'correto', 'exato', 'isso', 'ok', 'okay',
         'certo', 'perfeito', 'pode', 'confirmo', 'entendeu', 'entendi',
@@ -96,10 +96,48 @@ async def handle_problem_confirmation(
     ]
 
     if any(keyword in confirmation_lower for keyword in positive_keywords):
-        # Perguntar se quer criar demanda
-        state_manager.set_state(phone, 'asking_create_demand', state_context, db)
+        # Check if came from question flow
+        from_question = state_context.get('from_question', False)
+        
+        if from_question:
+            # User came from question flow - skip "asking_create_demand" and proceed directly
+            logger.info("✅ User from question flow confirmed - proceeding directly to demand creation")
+            
+            # Need to analyze scope and generate full demand_content
+            analyst = AnalystAgent()
+            classification = state_context.get('classification', {})
+            user_location = state_context.get('user_location', {})
+            
+            # Determine scope
+            scope_level = await analyst.determine_scope_level(classification, user_location)
+            
+            # Get reformulated demand text
+            demand_text = state_context.get('demand_content')
+            
+            # Generate structured content
+            demand_content = await analyst.generate_demand_content(
+                demand_text,
+                classification,
+                scope_level
+            )
+            
+            # Update context
+            state_context['scope_level'] = scope_level
+            state_context['demand_content'] = demand_content
+            
+            # Proceed directly to creation
+            return await handle_create_demand_decision(
+                user_id=user_id,
+                phone=phone,
+                decision_text='1',  # Simulate "create" choice
+                state_context=state_context,
+                db=db
+            )
+        else:
+            # Normal flow - ask if want to create demand
+            state_manager.set_state(phone, 'asking_create_demand', state_context, db)
 
-        response = """Ótimo! 👍
+            response = """Ótimo! 👍
 
 Agora você pode escolher:
 
@@ -111,9 +149,9 @@ O que você prefere?
 Digite *"1"* para criar a demanda
 Digite *"2"* para apenas conversar"""
 
-        return response
+            return response
 
-    # Confirmação NEGATIVA - expandida com mais variações
+    # Confirmação NEGATIVA
     negative_keywords = [
         'não', 'nao', 'n', 'no', 'errado', 'incorreto', 'negativo',
         'não!', 'nao!', 'n!', 'não está', 'nao esta', '2'
@@ -175,7 +213,7 @@ async def handle_create_demand_decision(
         embedding_service = EmbeddingService()
         similarity_service = SimilarityService()
 
-        # Gerar embedding
+        # Gerar embedding  
         text_for_embedding = embedding_service.prepare_text_for_embedding(
             demand_content['title'],
             demand_content['description'],
@@ -294,12 +332,14 @@ async def _create_new_demand(
             'coordinates': None
         }
 
-    # NOVO: Buscar PLs relacionados à demanda
+    # Buscar PLs relacionados à demanda (usa scope_level para busca inteligente)
     detective = DetectiveAgent()
     related_pls = await detective.find_related_pls(
         theme=classification.get('theme', 'outros'),
         keywords=classification.get('keywords', []),
-        db=db
+        db=db,
+        scope_level=scope_level,  # Uses demand's scope level for intelligent routing
+        location=user_location
     )
     await detective.close()
 

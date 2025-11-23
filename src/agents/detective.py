@@ -1,4 +1,4 @@
-from src.services.camara_api import CamaraAPI
+from src.services.camara_api import MultiSourceLegislativeAPI
 from src.models.legislative_item import LegislativeItem
 from src.models.pl_interaction import PLInteraction
 from sqlalchemy.orm import Session
@@ -8,209 +8,507 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+
+# ============================================================================
+# THEME MAPPING (expanded)
+# ============================================================================
+
+THEME_MAPPING = {
+    # Saúde
+    "saude": "saude",
+    "hospital": "saude",
+    "medico": "saude",
+    "sus": "saude",
+    "ubs": "saude",
+    "posto de saude": "saude",
+    
+    # Transporte
+    "transporte": "transporte",
+    "onibus": "transporte",
+    "metro": "transporte",
+    "mobilidade": "transporte",
+    "transito": "transporte",
+    
+    # Educação
+    "educacao": "educacao",
+    "escola": "educacao",
+    "professor": "educacao",
+    "aluno": "educacao",
+    "universidade": "educacao",
+    
+    # Segurança
+    "seguranca": "seguranca",
+    "policia": "seguranca",
+    "crime": "seguranca",
+    "violencia": "seguranca",
+    
+    # Meio Ambiente
+    "meio ambiente": "meio_ambiente",
+    "lixo": "meio_ambiente",
+    "poluicao": "meio_ambiente",
+    "reciclagem": "meio_ambiente",
+    
+    # Consumidor/Comércio
+    "consumidor": "industria_comercio",
+    "comercio": "industria_comercio",
+    "loja": "industria_comercio",
+    "restaurante": "industria_comercio",
+    "bar": "industria_comercio",
+    "estabelecimento": "industria_comercio",
+    
+    # Direitos dos Animais
+    "cachorro": "meio_ambiente",
+    "animal": "meio_ambiente",
+    "pet": "meio_ambiente",
+    "gato": "meio_ambiente",
+    "cao": "meio_ambiente",
+    
+    # Zeladoria
+    "buraco": "desenvolvimento_urbano",
+    "calcada": "desenvolvimento_urbano",
+    "iluminacao": "desenvolvimento_urbano",
+    "pavimentacao": "desenvolvimento_urbano",
+    
+    # Trabalho
+    "trabalho": "trabalho",
+    "emprego": "trabalho",
+    "trabalhador": "trabalho",
+    "desemprego": "trabalho",
+    
+    # Habitação
+    "moradia": "desenvolvimento_urbano",
+    "habitacao": "desenvolvimento_urbano",
+    "casa": "desenvolvimento_urbano",
+    
+    # Cultura
+    "cultura": "cultura",
+    "arte": "cultura",
+    "museu": "cultura",
+    
+    # Esporte
+    "esporte": "esporte",
+    "futebol": "esporte",
+    "atletismo": "esporte",
+}
+
+
+# ============================================================================
+# DETECTIVE AGENT
+# ============================================================================
+
 class DetectiveAgent:
     """
-    Investigates legislative items (PLs, PECs) related to user demands
-
-    Responsibilities:
-    - Search for related PLs using Câmara API
-    - Cache PLs in database to reduce API calls
-    - Expand keywords by theme for better search results
-    - Track user interactions with PLs
+    Investigates legislative items (PLs, PECs, Laws) related to user demands
+    
+    ENHANCED VERSION WITH MULTI-SOURCE API:
+    - Câmara dos Deputados (Federal bills)
+    - Senado Federal (Senate bills)  
+    - LexML (Unified search - all spheres)
+    - Querido Diário (Municipal official gazettes)
+    
+    KEY IMPROVEMENTS:
+    1. Intelligent keyword extraction and expansion
+    2. Automatic theme detection
+    3. Smart scope-based routing
+    4. ADJUSTED relevance scoring (less strict)
+    5. Multiple search strategies with fallback
     """
 
     def __init__(self):
-        self.camara_api = CamaraAPI()
+        self.api = MultiSourceLegislativeAPI()
 
     async def find_related_pls(
         self,
         theme: str,
         keywords: List[str],
-        db: Session
+        db: Session,
+        scope_level: int = 3,
+        location: Optional[Dict] = None,
+        user_message: Optional[str] = None
     ) -> List[Dict]:
         """
-        Find PLs related to a theme/demand
-
-        Flow:
-        1. Expand keywords based on theme
-        2. Search Câmara API
-        3. Save/update PLs in database (cache)
-        4. Return formatted results
-
+        Find legislation related to a theme/demand using intelligent multi-source search
+        
+        ENHANCED SEARCH STRATEGY:
+        1. Extract and expand keywords intelligently
+        2. Detect theme automatically from keywords + explicit theme
+        3. Search multiple sources based on scope
+        4. Score and rank results by relevance (LESS STRICT)
+        5. Return top 3-5 most relevant items
+        
         Args:
-            theme: Theme of the demand (saude, transporte, etc)
-            keywords: Keywords from user message
+            theme: Explicit theme (may be generic like "consumidor")
+            keywords: Keywords extracted from user message
             db: Database session
-
+            scope_level: Demand scope (1=hiper-local, 2=regional, 3=macro)
+            location: Location details {city, state, ibge_code}
+            user_message: Original user message for context
+        
         Returns:
-            List of related PLs with formatted data
-
-        Example:
-            >>> detective = DetectiveAgent()
-            >>> pls = await detective.find_related_pls('saude', ['hospital'], db)
-            >>> print(pls[0]['title'])
-            'PL 1234/2024'
+            List of top 3-5 most relevant legislation items
         """
-
-        # 1. Expand keywords by theme
-        expanded_keywords = self._expand_keywords(theme, keywords)
-        logger.info(f"🔍 Searching PLs for theme '{theme}' with keywords: {expanded_keywords}")
-
-        # 2. Search Câmara API
-        propositions = await self.camara_api.search_propositions(
-            keywords=expanded_keywords,
-            limit=5
-        )
-
-        # 2.1. If no results with keywords, try without keyword filtering
-        if not propositions and expanded_keywords:
-            logger.info("🔄 No results with keywords, trying broader search...")
-            propositions = await self.camara_api.search_propositions(
-                keywords=[],  # No keyword filtering
-                limit=5
+        
+        logger.info(f"🔍 Starting intelligent search: theme='{theme}', keywords={keywords}, scope={scope_level}")
+        
+        # Step 1: Enhance keywords with context
+        enhanced_keywords = self._enhance_keywords(keywords, theme, user_message)
+        logger.info(f"🔎 Enhanced keywords: {enhanced_keywords}")
+        
+        # Step 2: Detect specific theme
+        detected_theme = self._detect_theme(enhanced_keywords, theme)
+        logger.info(f"🎯 Detected theme: {detected_theme}")
+        
+        # Step 3: Try multiple search strategies
+        all_results = []
+        
+        # Strategy 1: Multi-source with detected theme
+        try:
+            results = await self.api.search_relevant_legislation(
+                keywords=enhanced_keywords,
+                scope=scope_level,
+                location=location,
+                theme=detected_theme,
+                limit=15  # Get more results for filtering
             )
-
-        if not propositions:
-            logger.info("📭 No PLs found in Câmara API")
+            all_results.extend(results)
+            logger.info(f"✅ Strategy 1 (theme-based): Found {len(results)} items")
+        except Exception as e:
+            logger.error(f"❌ Strategy 1 failed: {e}")
+        
+        # Strategy 2: If no results, try broader search without theme
+        if len(all_results) < 3:
+            try:
+                logger.info("🔄 Trying broader search without theme restriction...")
+                results = await self.api.search_relevant_legislation(
+                    keywords=enhanced_keywords,
+                    scope=scope_level,
+                    location=location,
+                    theme=None,  # No theme restriction
+                    limit=15
+                )
+                all_results.extend(results)
+                logger.info(f"✅ Strategy 2 (broader): Found {len(results)} items")
+            except Exception as e:
+                logger.error(f"❌ Strategy 2 failed: {e}")
+        
+        # Strategy 3: If still no results, try with only most important keywords
+        if len(all_results) < 3:
+            try:
+                logger.info("🔄 Trying with core keywords only...")
+                core_keywords = enhanced_keywords[:2]  # Use only top 2 keywords
+                results = await self.api.search_relevant_legislation(
+                    keywords=core_keywords,
+                    scope=3,  # Always search federal for fallback
+                    location=location,
+                    theme=None,  # No theme restriction
+                    limit=20
+                )
+                all_results.extend(results)
+                logger.info(f"✅ Strategy 3 (core keywords): Found {len(results)} items")
+            except Exception as e:
+                logger.error(f"❌ Strategy 3 failed: {e}")
+        
+        if not all_results:
+            logger.info("📭 No legislation found from any strategy")
             return []
-
-        # 3. Process and save to database
-        pls = []
-        for prop in propositions:
-            pl = await self._upsert_legislative_item(prop, db)
-            if pl:
-                pls.append({
-                    'id': str(pl.id),
-                    'external_id': pl.external_id,
-                    'type': pl.type,
-                    'number': pl.number,
-                    'year': pl.year,
-                    'title': pl.title,
-                    'summary': pl.summary,
-                    'ementa': pl.ementa,
-                    'status': pl.status
+        
+        logger.info(f"📊 Total results before processing: {len(all_results)}")
+        
+        # Step 4: Advanced relevance scoring
+        scored_results = self._score_relevance(
+            all_results,
+            enhanced_keywords,
+            user_message
+        )
+        
+        # Log top scores for debugging
+        for i, r in enumerate(scored_results[:5]):
+            logger.info(f"  #{i+1}: Score={r.get('_relevance_score', 0)} - {r.get('title', 'N/A')[:60]}")
+        
+        # Step 5: Filter low-quality results (LESS STRICT)
+        filtered_results = self._filter_by_quality(
+            scored_results,
+            enhanced_keywords,
+            min_score=0  # 👈 CHANGED: Accept any score (was 2)
+        )
+        
+        logger.info(f"🎯 After filtering: {len(filtered_results)} relevant items")
+        
+        # If still no results, return top scored without filtering
+        if not filtered_results and scored_results:
+            logger.warning("⚠️ No results passed quality filter, returning top scored items anyway")
+            filtered_results = scored_results[:5]
+        
+        # Step 6: Process and save to database
+        legislation = []
+        
+        for item in filtered_results[:5]:  # Top 5
+            saved_item = await self._upsert_legislative_item(item, db)
+            
+            if saved_item:
+                legislation.append({
+                    'id': str(saved_item.id),
+                    'external_id': saved_item.external_id,
+                    'type': saved_item.type,
+                    'number': saved_item.number,
+                    'year': saved_item.year,
+                    'title': saved_item.title,
+                    'summary': saved_item.summary,
+                    'ementa': saved_item.ementa,
+                    'status': saved_item.status,
+                    'source': self._format_source_name(saved_item.source),
+                    'relevance_score': item.get('_relevance_score', 0)
                 })
+        
+        logger.info(f"✅ Returning {len(legislation)} legislative items")
+        return legislation[:3]  # Return top 3 most relevant
 
-        logger.info(f"✅ Processed {len(pls)} PLs")
-        return pls
-
-    def _expand_keywords(self, theme: str, keywords: List[str]) -> List[str]:
+    def _enhance_keywords(
+        self,
+        keywords: List[str],
+        theme: str,
+        user_message: Optional[str] = None
+    ) -> List[str]:
         """
-        Expand keywords based on theme
-
-        Adds related terms to improve search results in Câmara API
-
-        Args:
-            theme: Theme identifier
-            keywords: Original keywords from user
-
-        Returns:
-            Expanded list of keywords (max 5 to avoid too broad searches)
-
-        Example:
-            >>> detective._expand_keywords('saude', ['hospital'])
-            ['hospital', 'saúde', 'SUS', 'médico']
+        Enhance keywords with context and variations
+        
+        LESS AGGRESSIVE: Keep original keywords + add some context
         """
+        enhanced = list(keywords)  # Start with original keywords
+        
+        # Don't add generic terms that pollute results
+        noise_words = {'o', 'a', 'de', 'da', 'do', 'em', 'na', 'no', 'para', 'por', 
+                      'com', 'um', 'uma', 'os', 'as', 'que', 'é', 'sobre', 'ter',
+                      'existe', 'lei', 'pl', 'projeto', 'PL'}  # 👈 Added 'PL'
+        
+        # Remove noise from original keywords
+        enhanced = [k for k in enhanced if k.lower() not in noise_words]
+        
+        # Extract from user message if available (but don't over-extract)
+        if user_message:
+            words = user_message.lower().split()
+            meaningful_words = [w for w in words if w not in noise_words and len(w) > 4]
+            enhanced.extend(meaningful_words[:2])  # 👈 CHANGED: Only top 2 (was 5)
+        
+        # Remove duplicates but preserve order
+        seen = set()
+        result = []
+        for k in enhanced:
+            if k.lower() not in seen:
+                seen.add(k.lower())
+                result.append(k)
+        
+        logger.debug(f"Enhanced keywords: {keywords} -> {result}")
+        return result
 
-        theme_expansions = {
-            'saude': ['saúde', 'SUS', 'hospital', 'médico', 'atendimento', 'medicamento'],
-            'transporte': ['transporte', 'mobilidade', 'ônibus', 'metrô', 'trânsito', 'viário'],
-            'educacao': ['educação', 'escola', 'ensino', 'professor', 'aluno', 'estudante'],
-            'seguranca': ['segurança', 'polícia', 'violência', 'crime', 'policial'],
-            'meio_ambiente': ['meio ambiente', 'ambiental', 'poluição', 'sustentabilidade', 'ecologia'],
-            'zeladoria': ['urbano', 'cidade', 'municipal', 'infraestrutura', 'zeladoria', 'público'],
-            'habitacao': ['habitação', 'moradia', 'casa', 'imóvel', 'residencial'],
-            'assistencia_social': ['assistência social', 'social', 'vulnerabilidade', 'família'],
-            'cultura': ['cultura', 'cultural', 'arte', 'artista', 'patrimônio'],
-            'esporte': ['esporte', 'esportivo', 'atleta', 'lazer', 'recreação'],
-            'animais': ['animal', 'animais', 'pet', 'cão', 'cachorro', 'gato', 'proteção animal'],
-            'consumidor': ['consumidor', 'consumo', 'direito do consumidor', 'estabelecimento', 'comércio'],
-            'outros': []  # For 'outros', use only the original keywords from user
+    def _detect_theme(
+        self,
+        keywords: List[str],
+        explicit_theme: Optional[str] = None
+    ) -> Optional[str]:
+        """
+        Detect specific theme from keywords
+        
+        Priority: explicit_theme > keyword mapping > None
+        """
+        # If explicit theme is specific enough, use it
+        specific_themes = ['saude', 'transporte', 'educacao', 'seguranca', 
+                          'meio_ambiente', 'trabalho', 'cultura', 'esporte',
+                          'industria_comercio', 'desenvolvimento_urbano']
+        
+        if explicit_theme and explicit_theme in specific_themes:
+            logger.debug(f"Using explicit theme: {explicit_theme}")
+            return explicit_theme
+        
+        # Detect from keywords (exact match first)
+        for keyword in keywords:
+            kw_lower = keyword.lower()
+            if kw_lower in THEME_MAPPING:
+                detected = THEME_MAPPING[kw_lower]
+                logger.debug(f"Theme detected (exact): '{keyword}' -> '{detected}'")
+                return detected
+        
+        # Fallback to explicit theme if provided
+        if explicit_theme:
+            logger.debug(f"Using fallback explicit theme: {explicit_theme}")
+            return explicit_theme
+        
+        logger.debug("No specific theme detected")
+        return None
+
+    def _score_relevance(
+        self,
+        results: List[Dict],
+        keywords: List[str],
+        user_message: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Score each result by relevance to user query
+        
+        ADJUSTED: More lenient scoring
+        """
+        keywords_lower = [k.lower() for k in keywords]
+        
+        for result in results:
+            score = 0
+            
+            title = result.get('title', '').lower()
+            description = result.get('description', '').lower()
+            
+            # Factor 1: Keyword matches in title (weight: 3) 👈 REDUCED from 5
+            for kw in keywords_lower:
+                if kw in title:
+                    score += 3
+            
+            # Factor 2: Keyword matches in description (weight: 1) 👈 REDUCED from 2
+            for kw in keywords_lower:
+                score += description.count(kw) * 1
+            
+            # Factor 3: Multiple keyword matches (weight: 2) 👈 REDUCED from 3
+            matching_keywords = sum(1 for kw in keywords_lower if kw in title or kw in description)
+            score += matching_keywords * 2
+            
+            # Factor 4: Recency bonus
+            if result.get('year'):
+                try:
+                    year = int(result['year'])
+                    current_year = datetime.now().year
+                    if year >= current_year:
+                        score += 2  # 👈 REDUCED from 3
+                    elif year >= current_year - 1:
+                        score += 1  # 👈 REDUCED from 2
+                except:
+                    pass
+            
+            # Factor 5: Source quality bonus
+            source = result.get('source', '')
+            if source in ['camara', 'senado']:
+                score += 1  # 👈 REDUCED from 2
+            
+            # Factor 6: Has any content bonus
+            if description:
+                score += 1
+            
+            # Store score in result
+            result['_relevance_score'] = score
+        
+        # Sort by score
+        return sorted(results, key=lambda x: x.get('_relevance_score', 0), reverse=True)
+
+    def _filter_by_quality(
+        self,
+        results: List[Dict],
+        keywords: List[str],
+        min_score: int = 0  # 👈 CHANGED: Was 2
+    ) -> List[Dict]:
+        """
+        Filter out low-quality/irrelevant results
+        
+        LESS STRICT: Only remove obvious bad results
+        """
+        keywords_lower = [k.lower() for k in keywords]
+        filtered = []
+        
+        for result in results:
+            # Check minimum score
+            if result.get('_relevance_score', 0) < min_score:
+                logger.debug(f"❌ Filtered (score {result.get('_relevance_score', 0)}): {result.get('title', 'N/A')[:50]}")
+                continue
+            
+            # Must have title
+            if not result.get('title'):
+                logger.debug(f"❌ Filtered (no title)")
+                continue
+            
+            # Must have description (but can be short)
+            description = result.get('description', '')
+            if not description or len(description) < 10:  # 👈 CHANGED: Was 20
+                logger.debug(f"❌ Filtered (no description): {result.get('title', 'N/A')[:50]}")
+                continue
+            
+            # Passed all filters
+            logger.debug(f"✅ Passed (score {result.get('_relevance_score', 0)}): {result.get('title', 'N/A')[:50]}")
+            filtered.append(result)
+        
+        return filtered
+
+    def _format_source_name(self, source: str) -> str:
+        """Format source name for display"""
+        source_names = {
+            'camara': 'Câmara dos Deputados',
+            'senado': 'Senado Federal',
+            'lexml': 'LexML (Multi-esfera)',
+            'querido_diario': 'Diário Oficial Municipal'
         }
-
-        # Start with original keywords
-        expanded = list(keywords)
-
-        # Add theme-specific expansions
-        if theme in theme_expansions:
-            expanded.extend(theme_expansions[theme])
-
-        # Remove duplicates and limit to 5 keywords
-        # (too many keywords can make search too broad)
-        expanded = list(set(expanded))[:5]
-
-        return expanded
+        return source_names.get(source, source.title())
 
     async def _upsert_legislative_item(
         self,
-        proposition_data: Dict,
+        item_data: Dict,
         db: Session
     ) -> Optional[LegislativeItem]:
         """
         Insert or update legislative item in database
-
-        Uses external_id as unique key (upsert pattern)
-        This creates a cache layer to avoid repeated API calls
-
-        Args:
-            proposition_data: Data from Câmara API
-            db: Database session
-
-        Returns:
-            LegislativeItem object or None if error
+        
+        Creates cache layer to avoid repeated API calls
         """
         try:
-            external_id = str(proposition_data['id'])
-
-            # Check if already exists
+            source = item_data.get('source', 'unknown')
+            external_id = item_data.get('id', '')
+            
+            # Create unique external ID with source prefix
+            if not external_id.startswith(source):
+                external_id = f"{source}_{external_id}"
+            
+            item_type = item_data.get('type', '')
+            number = item_data.get('number', '')
+            year = item_data.get('year', '')
+            title = item_data.get('title', '')
+            description = item_data.get('description', '')
+            
+            # Check if exists
             existing = db.query(LegislativeItem).filter(
                 LegislativeItem.external_id == external_id
             ).first()
-
-            # Extract data from API response
-            siglaTipo = proposition_data.get('siglaTipo', 'PL')
-            numero = proposition_data.get('numero', '')
-            ano = proposition_data.get('ano', datetime.now().year)
-            ementa = proposition_data.get('ementa', '')
-
+            
             if existing:
-                # Update existing record
-                existing.title = f"{siglaTipo} {numero}/{ano}"
-                existing.ementa = ementa
-                existing.summary = ementa[:500] if ementa else None
-                existing.full_data = proposition_data
+                # Update
+                existing.title = title
+                existing.ementa = description
+                existing.summary = description[:500] if description else None
+                existing.full_data = item_data
                 existing.updated_at = datetime.now()
-
+                
                 db.commit()
                 db.refresh(existing)
-
-                logger.debug(f"🔄 Updated PL: {existing.title}")
+                
+                logger.debug(f"🔄 Updated: {existing.title}")
                 return existing
             else:
-                # Create new record
-                pl = LegislativeItem(
+                # Create
+                item = LegislativeItem(
                     external_id=external_id,
-                    source='camara',
-                    type=siglaTipo,
-                    number=str(numero),
-                    year=int(ano),
-                    title=f"{siglaTipo} {numero}/{ano}",
-                    ementa=ementa,
-                    summary=ementa[:500] if ementa else None,
-                    status='Em tramitação',
-                    full_data=proposition_data,
-                    keywords=[]  # Will be populated in future updates
+                    source=source,
+                    type=item_type,
+                    number=str(number),
+                    year=int(year) if year and str(year).isdigit() else datetime.now().year,
+                    title=title,
+                    ementa=description,
+                    summary=description[:500] if description else None,
+                    status=item_data.get('status', 'Desconhecido'),
+                    full_data=item_data,
+                    keywords=[]
                 )
-
-                db.add(pl)
+                
+                db.add(item)
                 db.commit()
-                db.refresh(pl)
-
-                logger.debug(f"➕ Created PL: {pl.title}")
-                return pl
-
+                db.refresh(item)
+                
+                logger.debug(f"➕ Created: {item.title} (source: {source})")
+                return item
+        
         except Exception as e:
-            logger.error(f"❌ Error upserting legislative item: {e}")
+            logger.error(f"❌ Error upserting item: {e}", exc_info=True)
             db.rollback()
             return None
 
@@ -220,32 +518,24 @@ class DetectiveAgent:
         pl_id: str,
         db: Session
     ):
-        """
-        Register that user viewed a PL
-
-        Used for analytics and future recommendation systems
-
-        Args:
-            user_id: UUID of the user
-            pl_id: UUID of the legislative item
-            db: Database session
-        """
+        """Register that user viewed a legislative item"""
         try:
             interaction = PLInteraction(
                 user_id=user_id,
                 pl_id=pl_id,
                 interaction_type='view'
             )
-
+            
             db.add(interaction)
             db.commit()
-
+            
             logger.info(f"👁️ Registered PL view: user={user_id}, pl={pl_id}")
-
+        
         except Exception as e:
-            logger.error(f"❌ Error registering PL view: {e}")
+            logger.error(f"❌ Error registering view: {e}")
             db.rollback()
 
     async def close(self):
-        """Close API client connections"""
-        await self.camara_api.close()
+        """Close all API client connections"""
+        await self.api.close_all()
+        logger.debug("🔌 Closed all legislative API clients")

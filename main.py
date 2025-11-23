@@ -201,6 +201,29 @@ async def webhook(
                     db=db
                 )
 
+            # Estado 5: Escolhendo ação após ver PLs de uma dúvida
+            elif current_state and current_state.current_stage == 'choosing_demand_action_after_question':
+                from src.services.question_action_handler import handle_question_action_choice
+                response_text = await handle_question_action_choice(
+                    user_id=str(user.id),
+                    phone=phone,
+                    text=text,
+                    state_context=current_state.context_data,
+                    user_location=user.location_primary,
+                    db=db
+                )
+
+            # Estado 6: Escolhendo qual demanda apoiar após ver lista
+            elif current_state and current_state.current_stage == 'choosing_demand_to_support':
+                from src.services.demand_support_handler import handle_demand_support_choice
+                response_text = await handle_demand_support_choice(
+                    user_id=str(user.id),
+                    phone=phone,
+                    text=text,
+                    state_context=current_state.context_data,
+                    db=db
+                )
+
             # PRIORIDADE 2: Sem estado ativo → processar baseado na classificação
 
             # Tratamento de ONBOARDING para usuário ativo (saudação)
@@ -229,6 +252,7 @@ async def webhook(
                     phone=phone,
                     text=text,
                     classification=classification_result,
+                    user_location=user.location_primary,
                     db=db
                 )
 
