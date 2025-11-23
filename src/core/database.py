@@ -1,0 +1,29 @@
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from .config import settings
+
+# Ensure we use 127.0.0.1 instead of localhost to avoid Windows/Docker resolution issues
+# This is a runtime fix, but ideally should be in .env
+db_url = settings.DATABASE_URL.replace("localhost", "127.0.0.1")
+
+engine = create_engine(db_url)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def init_db():
+    """
+    Creates all tables defined in the metadata.
+    This replaces Alembic for simple setups.
+    """
+    # Import models here to ensure they are registered with Base
+    from src.models.interaction import Interaction  # noqa
+    Base.metadata.create_all(bind=engine)
