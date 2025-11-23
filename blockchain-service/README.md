@@ -1,6 +1,12 @@
 # Blockchain Service - Coral Platform
 
-Serviço de integração com blockchain para tokenização de registros cívicos na rede Polygon.
+Serviço de integração com blockchain para tokenização de registros cívicos na rede Ethereum (Sepolia testnet).
+
+## Smart Contract Deployado
+
+| Rede | Endereço | Explorer |
+|------|----------|----------|
+| **Sepolia (testnet)** | `0x883C02985C8eEA78f708dbf5C84A1772a6bfbc6C` | [Blockscout](https://eth-sepolia.blockscout.com/address/0x883C02985C8eEA78f708dbf5C84A1772a6bfbc6C?tab=contract) |
 
 ## Visão Geral
 
@@ -26,7 +32,7 @@ blockchain-service/
 │   │   └── database.py       # SQLAlchemy models para tracking
 │   ├── services/
 │   │   ├── hasher.py         # Serviço de hashing SHA-256
-│   │   └── blockchain.py     # Serviço Web3 para Polygon
+│   │   └── blockchain.py     # Serviço Web3 para Ethereum
 │   └── contracts/
 │       └── CivicRegistry.sol # Smart contract Solidity
 └── tests/
@@ -72,7 +78,7 @@ Endpoint principal para tokenização de registros.
   "tx_hash": "0x1234567890abcdef...",
   "status": "submitted",
   "block_number": null,
-  "network": "polygon-amoy",
+  "network": "sepolia",
   "message": "Transação enviada",
   "created_at": "2024-01-15T10:30:00Z"
 }
@@ -113,7 +119,7 @@ Health check do serviço.
 4. Salva registro local no PostgreSQL (status: pending)
            │
            ▼
-5. Envia transação para smart contract na Polygon
+5. Envia transação para smart contract na Sepolia
            │
            ▼
 6. Atualiza status para "submitted" com tx_hash
@@ -124,7 +130,11 @@ Health check do serviço.
 
 ## Smart Contract
 
-O contrato `CivicRegistry.sol` é um registro simples de hashes:
+O contrato `CivicRegistry.sol` está deployado na Sepolia:
+
+**Endereço**: `0x883C02985C8eEA78f708dbf5C84A1772a6bfbc6C`
+
+**Funções principais:**
 
 ```solidity
 // Registra um novo hash
@@ -146,14 +156,8 @@ function getRecord(bytes32 _dataHash) external view returns (
 );
 ```
 
-### Deploy do Contrato
-
-1. **Compile** o contrato usando Remix, Hardhat ou Foundry
-2. **Deploy** na rede Polygon Amoy (testnet) ou Polygon mainnet
-3. **Configure** o endereço no `.env`:
-   ```
-   CONTRACT_ADDRESS=0x...
-   ```
+**Verificar contrato no explorer:**
+- [Blockscout Sepolia](https://eth-sepolia.blockscout.com/address/0x883C02985C8eEA78f708dbf5C84A1772a6bfbc6C?tab=contract)
 
 ## Configuração
 
@@ -169,12 +173,13 @@ nano .env
 
 **Variáveis obrigatórias para produção:**
 
-| Variável | Descrição |
-|----------|-----------|
-| `DATABASE_URL` | URL do PostgreSQL |
-| `WALLET_PRIVATE_KEY` | Private key da wallet (sem 0x) |
-| `WALLET_ADDRESS` | Endereço da wallet |
-| `CONTRACT_ADDRESS` | Endereço do contrato deployado |
+| Variável | Descrição | Valor Padrão |
+|----------|-----------|--------------|
+| `DATABASE_URL` | URL do PostgreSQL | - |
+| `WALLET_PRIVATE_KEY` | Private key da wallet (sem 0x) | - |
+| `WALLET_ADDRESS` | Endereço da wallet | - |
+| `CONTRACT_ADDRESS` | Endereço do contrato | `0x883C02985C8eEA78f708dbf5C84A1772a6bfbc6C` |
+| `USE_TESTNET` | Usar Sepolia (true) ou mainnet (false) | `true` |
 
 ### Wallet
 
@@ -182,9 +187,9 @@ O serviço usa uma wallet **custodial** (gerenciada pelo backend):
 
 1. **Crie uma wallet** usando MetaMask ou qualquer outra ferramenta
 2. **Exporte a private key** (nunca commite!)
-3. **Deposite MATIC** para pagar gas:
-   - Testnet (Amoy): Use faucet https://faucet.polygon.technology/
-   - Mainnet: Compre MATIC e transfira
+3. **Deposite ETH (Sepolia)** para pagar gas:
+   - Faucet: https://sepoliafaucet.com/
+   - Faucet alternativo: https://www.alchemy.com/faucets/ethereum-sepolia
 
 ## Execução
 
@@ -245,15 +250,14 @@ docker-compose up -d blockchain-service
 
 ## Custos
 
-### Polygon (estimativas)
-- **Gas por transação**: ~50,000-100,000 gas
-- **Custo médio**: ~0.001-0.005 MATIC por registro
-- **Mainnet**: ~$0.001-0.01 USD por registro
+### Sepolia (Testnet)
+- **Custo**: Gratuito (use faucets para obter ETH de teste)
+- **Propósito**: Desenvolvimento e testes
 
-### Otimizações
-- Batch de registros (futuro)
-- Ajuste dinâmico de gas price
-- Retry com backoff exponencial
+### Ethereum Mainnet (Produção)
+- **Gas por transação**: ~50,000-100,000 gas
+- **Custo médio**: Depende do gas price atual
+- **Recomendação**: Considere L2s como Base ou Arbitrum para custos menores
 
 ## Testes
 
@@ -271,30 +275,58 @@ Após iniciar o serviço, acesse:
 - **Swagger UI**: http://localhost:8001/docs
 - **ReDoc**: http://localhost:8001/redoc
 
+## Exemplo de Uso
+
+```bash
+# Registrar uma demanda
+curl -X POST http://localhost:8001/blockas \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tipo": "demanda",
+    "dados": {
+      "demand_id": "123e4567-e89b-12d3-a456-426614174000",
+      "title": "Buracos na Rua das Flores",
+      "creator_phone": "+5511999999999",
+      "theme": "zeladoria",
+      "scope_level": 1
+    }
+  }'
+
+# Verificar status da transação
+curl http://localhost:8001/blockas/status/0x1234...
+
+# Verificar hash on-chain
+curl http://localhost:8001/blockas/verify/abc123...
+```
+
 ## Roadmap
 
 - [x] Endpoint `/blockas` básico
 - [x] Suporte a 4 tipos de registro
 - [x] Tracking local de transações
 - [x] Verificação on-chain
+- [x] Deploy na Sepolia
 - [ ] Batch de registros
 - [ ] Webhook para notificação de confirmação
 - [ ] Dashboard de monitoramento
-- [ ] Suporte a múltiplas redes (Base, Arbitrum)
+- [ ] Migração para L2 (Base/Arbitrum) em produção
 
 ## Troubleshooting
 
 ### "Serviço não configurado"
-Configure `WALLET_PRIVATE_KEY` e `CONTRACT_ADDRESS` no `.env`
+Configure `WALLET_PRIVATE_KEY` no `.env`
 
 ### "Insufficient funds"
-Deposite MATIC na wallet do backend
+Deposite ETH (Sepolia) na wallet do backend usando um faucet
 
 ### "Transaction reverted"
 Verifique se a wallet está autorizada no contrato (`addRegistrar`)
 
 ### "Hash já registrado"
 O mesmo conjunto de dados já foi tokenizado anteriormente
+
+### "Falha ao conectar com a blockchain"
+Verifique a URL do RPC e sua conexão com a internet
 
 ## Contribuição
 

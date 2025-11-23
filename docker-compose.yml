@@ -51,18 +51,19 @@ services:
       API_PORT: "8001"
       # Database
       DATABASE_URL: "postgresql://coral_user:senha123@postgres-blockchain:5432/coral_blockchain"
-      # Blockchain - Polygon Amoy Testnet
-      POLYGON_RPC_URL: "https://polygon-rpc.com"
-      POLYGON_TESTNET_RPC_URL: "https://rpc-amoy.polygon.technology"
+      # Blockchain - Ethereum Sepolia Testnet
+      SEPOLIA_RPC_URL: "https://rpc.sepolia.org"
+      ETHEREUM_MAINNET_RPC_URL: "https://eth.llamarpc.com"
       USE_TESTNET: "true"
       # Wallet - Configure via .env ou secrets
       WALLET_PRIVATE_KEY: "${BLOCKCHAIN_WALLET_PRIVATE_KEY:-}"
       WALLET_ADDRESS: "${BLOCKCHAIN_WALLET_ADDRESS:-}"
-      CONTRACT_ADDRESS: "${BLOCKCHAIN_CONTRACT_ADDRESS:-}"
+      # Contract deployed on Sepolia
+      CONTRACT_ADDRESS: "${BLOCKCHAIN_CONTRACT_ADDRESS:-0x883C02985C8eEA78f708dbf5C84A1772a6bfbc6C}"
       # Gas
       GAS_LIMIT: "200000"
-      MAX_PRIORITY_FEE_GWEI: "30.0"
-      MAX_FEE_GWEI: "50.0"
+      MAX_PRIORITY_FEE_GWEI: "2.0"
+      MAX_FEE_GWEI: "10.0"
       # Security
       CIVIC_ID_SALT: "coral_civic_id"
     depends_on:

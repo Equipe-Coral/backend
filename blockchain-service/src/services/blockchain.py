@@ -1,5 +1,5 @@
 """
-Serviço de integração com blockchain Polygon.
+Serviço de integração com blockchain Ethereum (Sepolia testnet).
 Responsável por enviar transações e verificar status.
 """
 
@@ -9,7 +9,6 @@ from datetime import datetime
 from typing import Optional, Tuple
 
 from web3 import Web3
-from web3.middleware import geth_poa_middleware
 from eth_account import Account
 from sqlalchemy.orm import Session
 
@@ -68,7 +67,7 @@ CONTRACT_ABI = [
 
 class BlockchainService:
     """
-    Serviço para interação com a blockchain Polygon.
+    Serviço para interação com a blockchain Ethereum (Sepolia).
     Gerencia conexão Web3, envio de transações e verificação de status.
     """
 
@@ -86,9 +85,6 @@ class BlockchainService:
         try:
             # Conectar ao RPC
             self.w3 = Web3(Web3.HTTPProvider(settings.rpc_url))
-
-            # Middleware para redes PoA (Polygon)
-            self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
             if not self.w3.is_connected():
                 logger.error("Falha ao conectar com a blockchain")
@@ -108,8 +104,7 @@ class BlockchainService:
                 logger.info(f"Contrato carregado: {settings.CONTRACT_ADDRESS}")
 
             self._initialized = True
-            network = "polygon-amoy" if settings.USE_TESTNET else "polygon-mainnet"
-            logger.info(f"Blockchain service inicializado na rede: {network}")
+            logger.info(f"Blockchain service inicializado na rede: {settings.network_name}")
             return True
 
         except Exception as e:
@@ -119,7 +114,7 @@ class BlockchainService:
     @property
     def network_name(self) -> str:
         """Retorna nome da rede atual."""
-        return "polygon-amoy" if settings.USE_TESTNET else "polygon-mainnet"
+        return settings.network_name
 
     @property
     def is_configured(self) -> bool:
@@ -131,7 +126,7 @@ class BlockchainService:
         )
 
     def get_balance(self) -> Optional[float]:
-        """Retorna o saldo da wallet em MATIC."""
+        """Retorna o saldo da wallet em ETH."""
         if not self.account or not self.w3:
             return None
         balance_wei = self.w3.eth.get_balance(self.account.address)
@@ -189,7 +184,7 @@ class BlockchainService:
                 metadata
             ).estimate_gas({"from": self.account.address})
 
-            # Construir transação com EIP-1559 (para Polygon)
+            # Construir transação com EIP-1559
             tx = self.contract.functions.registerRecord(
                 hash_bytes,
                 tipo,

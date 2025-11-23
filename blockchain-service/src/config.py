@@ -4,7 +4,6 @@ Carrega variáveis de ambiente e define constantes.
 """
 
 from pydantic_settings import BaseSettings
-from typing import Optional
 
 
 class Settings(BaseSettings):
@@ -17,9 +16,9 @@ class Settings(BaseSettings):
     # Database Settings (para tracking de transações)
     DATABASE_URL: str = "postgresql://coral_user:senha123@localhost:5433/coral_blockchain"
 
-    # Blockchain Settings - Polygon
-    POLYGON_RPC_URL: str = "https://polygon-rpc.com"  # Mainnet
-    POLYGON_TESTNET_RPC_URL: str = "https://rpc-amoy.polygon.technology"  # Amoy Testnet
+    # Blockchain Settings - Ethereum Sepolia Testnet
+    SEPOLIA_RPC_URL: str = "https://rpc.sepolia.org"
+    ETHEREUM_MAINNET_RPC_URL: str = "https://eth.llamarpc.com"
 
     # Usar testnet por padrão para desenvolvimento
     USE_TESTNET: bool = True
@@ -28,21 +27,26 @@ class Settings(BaseSettings):
     WALLET_PRIVATE_KEY: str = ""
     WALLET_ADDRESS: str = ""
 
-    # Smart Contract
-    CONTRACT_ADDRESS: str = ""
+    # Smart Contract - Deployed on Sepolia
+    CONTRACT_ADDRESS: str = "0x883C02985C8eEA78f708dbf5C84A1772a6bfbc6C"
 
     # Hash salt (deve ser o mesmo do backend principal para consistência)
     CIVIC_ID_SALT: str = "coral_civic_id"
 
     # Gas Settings
     GAS_LIMIT: int = 200000
-    MAX_PRIORITY_FEE_GWEI: float = 30.0  # Para Polygon
-    MAX_FEE_GWEI: float = 50.0
+    MAX_PRIORITY_FEE_GWEI: float = 2.0  # Sepolia gas prices
+    MAX_FEE_GWEI: float = 10.0
 
     @property
     def rpc_url(self) -> str:
         """Retorna a URL RPC baseada na configuração de testnet."""
-        return self.POLYGON_TESTNET_RPC_URL if self.USE_TESTNET else self.POLYGON_RPC_URL
+        return self.SEPOLIA_RPC_URL if self.USE_TESTNET else self.ETHEREUM_MAINNET_RPC_URL
+
+    @property
+    def network_name(self) -> str:
+        """Retorna o nome da rede atual."""
+        return "sepolia" if self.USE_TESTNET else "ethereum-mainnet"
 
     class Config:
         env_file = ".env"
