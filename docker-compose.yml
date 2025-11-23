@@ -17,6 +17,30 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - app_network
+
+  auth:
+    build:
+      context: ./auth
+      dockerfile: auth-dev.dockerfile
+    container_name: coral-auth
+    environment:
+      - AUTH_APP_BASE_URL=http://localhost/api/auth
+    env_file:
+      - ./auth/.env
+    ports:
+      - "${AUTH_PORT:-8084}:${AUTH_PORT:-8084}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app_network
+    restart: unless-stopped
 
 volumes:
   postgres_data:
+
+networks:
+  app_network:
+    driver: bridge
