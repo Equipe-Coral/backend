@@ -10,6 +10,8 @@ from src.agents.router import RouterAgent
 from src.agents.profiler import ProfilerAgent
 from src.core.state_manager import ConversationStateManager
 from src.services.onboarding_handler import handle_onboarding
+from src.services.demand_handler import handle_demand_creation
+from src.models.demand import Demand
 import uvicorn
 import uuid
 import os
@@ -44,7 +46,6 @@ def health_check():
     return {"status": "ok", "database": "connected"}
 
 @app.post("/webhook", response_model=WebhookResponse)
-@app.post("/webhook", response_model=WebhookResponse)
 async def webhook(
     request: Request,
     db: Session = Depends(get_db)
@@ -57,6 +58,7 @@ async def webhook(
     try:
         content_type = request.headers.get("content-type", "")
         
+        # 1. PROCESSAMENTO DE ENTRADA (Multipart/Audio ou JSON/Texto)
         if "multipart/form-data" in content_type:
             logger.info("Processing multipart/form-data request")
             form = await request.form()
@@ -98,9 +100,6 @@ async def webhook(
         elif "application/json" in content_type:
             logger.info("Processing application/json request")
             data = await request.json()
-            # Map 'type' to 'message_type' if needed, or just use defaults
-            # api-client.js sends 'type', WebhookMessage expects 'message_type'
-            # We can manually construct the object
             
             phone = data.get("from")
             text = data.get("body")
@@ -113,51 +112,22 @@ async def webhook(
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported Content-Type: {content_type}")
 
-        # 2. Classify
+        # 2. CLASSIFICAÇÃO (Agente Roteador)
         router = RouterAgent()
         classification_result = await router.classify_and_extract(text)
         logger.info(f"Classification: {classification_result}")
 
-        # 3. Check user and conversation state
+        # 3. VERIFICAÇÃO DE ESTADO E USUÁRIO (Profiler)
         profiler = ProfilerAgent()
         state_manager = ConversationStateManager()
         
         user = await profiler.check_user_exists(phone, db)
         current_state = state_manager.get_state(phone, db)
         
-        # 4. Route based on user status and onboarding completion
-        if not user or user.status == 'onboarding_incomplete':
-            # User needs onboarding
-            logger.info(f"Routing to onboarding for {phone}")
-            response_text = await handle_onboarding(
-                phone, text, classification_result,
-                user, current_state, db
-            )
-            
-            # Save interaction (without user_id if user not created yet)
-            interaction = Interaction(
-                phone=phone,
-                user_id=user.id if user else None,
-                message_type=msg_type,
-                original_message=text if msg_type == "text" else None,
-                transcription=text if msg_type == "audio" else None,
-                audio_duration_seconds=audio_duration,
-                classification=classification_result.get("classification"),
-                extracted_data=classification_result
-            )
-            db.add(interaction)
-            db.commit()
-            
-            return {"response": response_text}
-        
-        # 5. User exists and onboarding complete - handle other flows
-        # TODO: Implement demand, question, and other flows in future steps
-        logger.info(f"User {user.id} already onboarded, processing message")
-        
-        # Save interaction with user_id
+        # 4. SALVAR INTERAÇÃO (LOG) - MOVIDO PARA ANTES DO ROTEAMENTO
         interaction = Interaction(
             phone=phone,
-            user_id=user.id,
+            user_id=user.id if user else None,
             message_type=msg_type,
             original_message=text if msg_type == "text" else None,
             transcription=text if msg_type == "audio" else None,
@@ -167,63 +137,62 @@ async def webhook(
         )
         db.add(interaction)
         db.commit()
+        db.refresh(interaction)
+        logger.info(f"Interaction saved: {interaction.id}")
+
+        # 5. ROTEAMENTO DE FLUXO
         
-        # 6. Response (temporary - will be replaced with specific handlers in next steps)
-        classification = classification_result.get('classification', 'OUTRO')
-        theme = classification_result.get('theme', 'outros')
-        urgency = classification_result.get('urgency', 'baixa')
-        
-        # Mensagem amigável baseada na classificação
-        if classification == 'DEMANDA':
-            response_text = f"""✅ Recebi sua demanda sobre {theme}!
-
-📋 Classificação: {classification}
-🔹 Urgência: {urgency}
-📍 Localização cadastrada: {user.location_primary.get('city', 'não especificada') if user.location_primary else 'não informada'}
-
-💬 Você disse: "{text[:100]}{'...' if len(text) > 100 else ''}"
-
-⚠️ **Sistema em desenvolvimento (Step 3)**
-Em breve vou:
-• Buscar demandas similares
-• Encontrar Projetos de Lei relacionados
-• Te conectar com outros cidadãos
-
-Por enquanto, estou apenas registrando. Obrigado pela paciência! 🙏"""
-        
-        elif classification == 'DUVIDA':
-            response_text = f"""✅ Recebi sua dúvida sobre {theme}!
-
-📋 Classificação: {classification}
-❓ Pergunta: "{text[:100]}{'...' if len(text) > 100 else ''}"
-
-⚠️ **Sistema em desenvolvimento**
-Em breve vou te ajudar com:
-• Explicações sobre leis e PLs
-• Análise de impacto na sua região
-• Respostas pedagógicas
-
-Por enquanto, estou apenas aprendendo! 📚"""
-        
+        # FLUXO A: Usuário Novo ou Onboarding Incompleto
+        if not user or user.status == 'onboarding_incomplete':
+            logger.info(f"Routing to onboarding for {phone}")
+            response_text = await handle_onboarding(
+                phone, text, classification_result,
+                user, current_state, db
+            )
+            
+        # FLUXO B: Usuário Ativo (Já cadastrado)
         else:
-            response_text = f"""✅ Mensagem recebida!
+            logger.info(f"Routing to Active/Demand Flow for {phone}")
+            
+            # Tratamento de ONBOARDING para usuário ativo
+            if classification_result.get('classification') == 'ONBOARDING':
+                logger.info(f"Active user greeting: {user.id}")
+                response_text = "Oi! 👋 Já nos conhecemos 😊\n\nComo posso te ajudar hoje?\n\n💡 Dica: Você pode relatar problemas do seu bairro ou tirar dúvidas sobre leis!"
 
-📋 Tipo: {classification}
-📍 Tema: {theme}
+            # Verifica se existe um estado de conversa específico (ex: respondendo a uma pergunta do bot)
+            # Se não houver estado, assume fluxo padrão de demanda
+            elif current_state and current_state.current_stage != 'processing_demand':
+                 # Se tivéssemos fluxos multi-turn para demandas complexas, trataríamos aqui
+                 pass
+                 # Fallback para demanda se não tiver handler específico
+                 response_text = await handle_demand_creation(
+                    user_id=str(user.id),
+                    phone=phone,
+                    text=text,
+                    classification=classification_result,
+                    user_location=user.location_primary,
+                    interaction_id=str(interaction.id),
+                    db=db
+                )
 
-"{text[:100]}{'...' if len(text) > 100 else ''}"
+            else:
+                # Chama o Handler de Demandas (CRIAÇÃO DE DEMANDA ACONTECE AQUI)
+                response_text = await handle_demand_creation(
+                    user_id=str(user.id),
+                    phone=phone,
+                    text=text,
+                    classification=classification_result,
+                    user_location=user.location_primary,
+                    interaction_id=str(interaction.id),
+                    db=db
+                )
 
-⚠️ **Em desenvolvimento**
-Funcionalidades completas chegando em breve! 🚀""" 
-        
-        if audio_duration:
-            response_text += f"\n\n🎙️ Áudio de {audio_duration:.1f}s transcrito com sucesso"
-
-        return {"response": response_text}
+        return WebhookResponse(response=response_text)
 
     except Exception as e:
-        logger.error(f"Error processing webhook: {e}")
-        return {"response": "Desculpe, ocorreu um erro ao processar sua mensagem."}
+        logger.error(f"Error processing webhook: {e}", exc_info=True)
+        # Retorna erro genérico mas não derruba o webhook do whatsapp
+        return WebhookResponse(response="Desculpe, tive um erro interno. Tente novamente mais tarde.")
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host=settings.API_HOST, port=settings.API_PORT, reload=True)

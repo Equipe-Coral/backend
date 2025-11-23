@@ -18,6 +18,10 @@ class User(Base):
 
     # Relationship with interactions
     interactions = relationship("Interaction", back_populates="user")
+    # Relationship with demands
+    demands = relationship("Demand", back_populates="creator")
+    # Relationship with supported demands
+    supported_demands = relationship("DemandSupporter", back_populates="user")
 
     def __repr__(self):
         return f"<User(id={self.id}, phone={self.phone}, status={self.status})>"

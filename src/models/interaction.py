@@ -11,6 +11,7 @@ class Interaction(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     phone = Column(String(50), nullable=False, index=True)
     user_id = Column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True, index=True)
+    demand_id = Column(UUID(as_uuid=True), ForeignKey('demands.id'), nullable=True, index=True)
     message_type = Column(String(20), nullable=False, index=True)  # 'text', 'audio', 'image'
     original_message = Column(Text, nullable=True)
     transcription = Column(Text, nullable=True)
@@ -19,5 +20,6 @@ class Interaction(Base):
     extracted_data = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
-    # Relationship with user
+    # Relationships
     user = relationship("User", back_populates="interactions")
+    demand = relationship("Demand", back_populates="interactions")

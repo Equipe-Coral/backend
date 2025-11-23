@@ -27,6 +27,13 @@ def init_db():
     # Import models here to ensure they are registered with Base
     from src.models.interaction import Interaction  # noqa
     from src.models.user import User  # noqa
+    from src.models.demand import Demand  # noqa
+    from src.models.demand_supporter import DemandSupporter  # noqa
     from src.models.conversation_state import ConversationState  # noqa
+
+    # Configure the registry to resolve all relationships
+    from sqlalchemy.orm import configure_mappers
+    configure_mappers()
+
     Base.metadata.create_all(bind=engine)
 
