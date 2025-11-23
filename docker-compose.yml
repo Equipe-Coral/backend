@@ -18,5 +18,64 @@ services:
       timeout: 5s
       retries: 5
 
+  # ========================================
+  # Blockchain Service
+  # ========================================
+  postgres-blockchain:
+    image: postgres:16
+    container_name: coral-postgres-blockchain
+    environment:
+      POSTGRES_USER: coral_user
+      POSTGRES_PASSWORD: senha123
+      POSTGRES_DB: coral_blockchain
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_blockchain_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coral_user -d coral_blockchain"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  blockchain-service:
+    build:
+      context: ./blockchain-service
+      dockerfile: Dockerfile
+    container_name: coral-blockchain-service
+    ports:
+      - "8001:8001"
+    environment:
+      # API
+      API_HOST: "0.0.0.0"
+      API_PORT: "8001"
+      # Database
+      DATABASE_URL: "postgresql://coral_user:senha123@postgres-blockchain:5432/coral_blockchain"
+      # Blockchain - Polygon Amoy Testnet
+      POLYGON_RPC_URL: "https://polygon-rpc.com"
+      POLYGON_TESTNET_RPC_URL: "https://rpc-amoy.polygon.technology"
+      USE_TESTNET: "true"
+      # Wallet - Configure via .env ou secrets
+      WALLET_PRIVATE_KEY: "${BLOCKCHAIN_WALLET_PRIVATE_KEY:-}"
+      WALLET_ADDRESS: "${BLOCKCHAIN_WALLET_ADDRESS:-}"
+      CONTRACT_ADDRESS: "${BLOCKCHAIN_CONTRACT_ADDRESS:-}"
+      # Gas
+      GAS_LIMIT: "200000"
+      MAX_PRIORITY_FEE_GWEI: "30.0"
+      MAX_FEE_GWEI: "50.0"
+      # Security
+      CIVIC_ID_SALT: "coral_civic_id"
+    depends_on:
+      postgres-blockchain:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  postgres_blockchain_data:
