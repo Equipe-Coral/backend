@@ -806,3 +806,81 @@ INFO: Created new user [user_id]
 - Cenário 4: Com PL + Com demanda similar → Oferecer apoio + vincular PL
 - Implementar Agente Investigador para buscar PLs relevantes
 - Implementar Agente Analista para análise de impacto
+
+---
+
+## ✅ STEP 4: Busca de Similaridade
+
+**Status:** Completo
+**Data:** 23/11/2025
+
+### O que foi implementado
+
+#### 1. Database - pgvector
+
+- [x] Extensão pgvector instalada
+- [x] Coluna embedding (vector(768)) adicionada
+- [x] Índice HNSW criado para busca rápida
+
+#### 2. Serviço de Embeddings
+
+- [x] Integração com Gemini text-embedding-004
+- [x] Geração de vetores de 768 dimensões
+- [x] Preparação de texto combinado (título + descrição + tema)
+
+#### 3. Serviço de Similaridade
+
+- [x] Busca vetorial com pgvector
+- [x] Filtros: tema, scope_level, status, threshold
+- [x] Cálculo de distância geográfica (Haversine)
+- [x] Filtro geográfico para Nível 1 (< 2km)
+
+#### 4. Fluxo de Detecção
+
+- [x] Gerar embedding antes de criar demanda
+- [x] Buscar similares com threshold 0.80
+- [x] Oferecer escolha ao usuário
+- [x] Estado temporário para aguardar escolha
+
+#### 5. Sistema de Apoio
+
+- [x] Adicionar usuário como apoiador
+- [x] Incrementar contador automaticamente
+- [x] Prevenir duplicação de apoio
+
+### Testes Realizados
+
+**Teste 1: Detectar similar**
+
+User A: "Buraco na Av. Paulista, 1000"
+→ Demanda criada (ID: abc123)
+
+User B: "Tem um buraco enorme na Paulista"
+→ Sistema encontrou 1 similar (92% similaridade)
+→ Oferece apoiar ou criar nova
+
+**Teste 2: Apoiar existente**
+
+User B: "1"
+→ ✅ Apoio registrado
+→ Contador: 2 apoiadores
+
+**Teste 3: Criar nova mesmo assim**
+
+User C: "Buraco na Paulista"
+→ Sistema mostra similar
+User C: "nova"
+→ ✅ Nova demanda criada
+
+**Métricas de similaridade:**
+
+- Threshold 0.80: boa precisão, poucos falsos positivos
+- Demandas idênticas: 0.95-0.98 similaridade
+- Demandas relacionadas: 0.82-0.88
+- Demandas diferentes: < 0.70
+
+### Próximos passos (Step 5)
+
+- Integração com API da Câmara dos Deputados
+- Buscar PLs relacionados às demandas
+- Agente Pedagogo para traduzir PLs

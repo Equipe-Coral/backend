@@ -153,30 +153,63 @@ async def webhook(
         # FLUXO B: Usuário Ativo (Já cadastrado)
         else:
             logger.info(f"Routing to Active/Demand Flow for {phone}")
-            
-            # Tratamento de ONBOARDING para usuário ativo
-            if classification_result.get('classification') == 'ONBOARDING':
-                logger.info(f"Active user greeting: {user.id}")
-                response_text = "Oi! 👋 Já nos conhecemos 😊\n\nComo posso te ajudar hoje?\n\n💡 Dica: Você pode relatar problemas do seu bairro ou tirar dúvidas sobre leis!"
 
-            # Verifica se existe um estado de conversa específico (ex: respondendo a uma pergunta do bot)
-            # Se não houver estado, assume fluxo padrão de demanda
-            elif current_state and current_state.current_stage != 'processing_demand':
-                 # Se tivéssemos fluxos multi-turn para demandas complexas, trataríamos aqui
-                 pass
-                 # Fallback para demanda se não tiver handler específico
-                 response_text = await handle_demand_creation(
+            # PRIORIDADE 1: Verifica se existe um estado de conversa específico (multi-turn)
+            # Estados devem ser verificados ANTES da classificação da mensagem atual
+
+            # Estado 1: Confirmando entendimento do problema
+            if current_state and current_state.current_stage == 'confirming_problem':
+                from src.services.demand_handler import handle_problem_confirmation
+                response_text = await handle_problem_confirmation(
                     user_id=str(user.id),
                     phone=phone,
-                    text=text,
-                    classification=classification_result,
-                    user_location=user.location_primary,
-                    interaction_id=str(interaction.id),
+                    confirmation_text=text,
+                    state_context=current_state.context_data,
                     db=db
                 )
 
-            else:
-                # Chama o Handler de Demandas (CRIAÇÃO DE DEMANDA ACONTECE AQUI)
+            # Estado 2: Perguntando se quer criar demanda ou apenas conversar
+            elif current_state and current_state.current_stage == 'asking_create_demand':
+                from src.services.demand_handler import handle_create_demand_decision
+                response_text = await handle_create_demand_decision(
+                    user_id=str(user.id),
+                    phone=phone,
+                    decision_text=text,
+                    state_context=current_state.context_data,
+                    db=db
+                )
+
+            # Estado 3: Escolhendo entre demandas similares ou criar nova
+            elif current_state and current_state.current_stage == 'choosing_similar_or_new':
+                from src.services.demand_handler import handle_demand_choice
+                response_text = await handle_demand_choice(
+                    user_id=str(user.id),
+                    phone=phone,
+                    choice_text=text,
+                    state_context=current_state.context_data,
+                    db=db
+                )
+
+            # Estado 4: (Legado) Escolhendo demanda similar - mantido para compatibilidade
+            elif current_state and current_state.current_stage == 'awaiting_demand_choice':
+                from src.services.demand_handler import handle_demand_choice
+                response_text = await handle_demand_choice(
+                    user_id=str(user.id),
+                    phone=phone,
+                    choice_text=text,
+                    state_context=current_state.context_data,
+                    db=db
+                )
+
+            # PRIORIDADE 2: Sem estado ativo → processar baseado na classificação
+
+            # Tratamento de ONBOARDING para usuário ativo (saudação)
+            elif classification_result.get('classification') == 'ONBOARDING':
+                logger.info(f"Active user greeting: {user.id}")
+                response_text = "Oi! 👋 Já nos conhecemos 😊\n\nComo posso te ajudar hoje?\n\n💡 Dica: Você pode relatar problemas do seu bairro ou tirar dúvidas sobre leis!"
+
+            # Tratamento de DEMANDA (inicia novo fluxo de criação)
+            elif classification_result.get('classification') == 'DEMANDA':
                 response_text = await handle_demand_creation(
                     user_id=str(user.id),
                     phone=phone,
@@ -186,6 +219,11 @@ async def webhook(
                     interaction_id=str(interaction.id),
                     db=db
                 )
+
+            # Outros tipos de mensagem (OUTRO, etc.)
+            else:
+                # Aqui poderia ter outros handlers (FAQ, informações, etc.)
+                response_text = "Entendi. Como posso ajudar?\n\n💡 Você pode relatar problemas do seu bairro ou tirar dúvidas sobre serviços públicos!"
 
         return WebhookResponse(response=response_text)
 

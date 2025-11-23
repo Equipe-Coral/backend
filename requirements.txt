@@ -12,3 +12,5 @@ python-multipart
 google-generativeai
 pydub
 geopy
+google-genai
+pgvector

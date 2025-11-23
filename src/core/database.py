@@ -35,5 +35,11 @@ def init_db():
     from sqlalchemy.orm import configure_mappers
     configure_mappers()
 
+    # Enable pgvector extension
+    from sqlalchemy import text
+    with engine.connect() as connection:
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        connection.commit()
+
     Base.metadata.create_all(bind=engine)
 
