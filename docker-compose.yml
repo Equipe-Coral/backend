@@ -17,6 +17,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - app_network
 
   # ========================================
   # Blockchain Service
@@ -37,6 +39,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - app_network
 
   blockchain-service:
     build:
@@ -45,27 +49,26 @@ services:
     container_name: coral-blockchain-service
     ports:
       - "8001:8001"
+    env_file:
+      - ./blockchain-service/.env
     environment:
       # API
       API_HOST: "0.0.0.0"
       API_PORT: "8001"
-      # Database
+      # Database (URL da blockchain)
       DATABASE_URL: "postgresql://coral_user:senha123@postgres-blockchain:5432/coral_blockchain"
       # Blockchain - Ethereum Sepolia Testnet
       SEPOLIA_RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com"
       ETHEREUM_MAINNET_RPC_URL: "https://eth.llamarpc.com"
       USE_TESTNET: "true"
-      # Wallet - Configure via .env ou secrets
-      WALLET_PRIVATE_KEY: "${BLOCKCHAIN_WALLET_PRIVATE_KEY:-}"
-      WALLET_ADDRESS: "${BLOCKCHAIN_WALLET_ADDRESS:-}"
-      # Contract deployed on Sepolia
-      CONTRACT_ADDRESS: "${BLOCKCHAIN_CONTRACT_ADDRESS:-0x883C02985C8eEA78f708dbf5C84A1772a6bfbc6C}"
       # Gas
       GAS_LIMIT: "200000"
       MAX_PRIORITY_FEE_GWEI: "2.0"
       MAX_FEE_GWEI: "10.0"
       # Security
       CIVIC_ID_SALT: "coral_civic_id"
+      # Nota: WALLET_PRIVATE_KEY, WALLET_ADDRESS e CONTRACT_ADDRESS
+      # são carregados do arquivo ./blockchain-service/.env via env_file
     depends_on:
       postgres-blockchain:
         condition: service_healthy
@@ -76,7 +79,13 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+    networks:
+      - app_network
 
 volumes:
   postgres_data:
   postgres_blockchain_data:
+
+networks:
+  app_network:
+    driver: bridge
