@@ -142,6 +142,7 @@ class BlockchainService:
     ) -> Tuple[TransactionStatus, Optional[str], Optional[str]]:
         """
         Registra um hash na blockchain.
+        Em caso de erro, salva no banco de dados como fallback.
 
         Args:
             data_hash: Hash SHA-256 dos dados (64 chars hex)
@@ -153,7 +154,7 @@ class BlockchainService:
         Returns:
             Tuple de (status, tx_hash, error_message)
         """
-        # Criar registro local primeiro
+        # Criar registro local primeiro (SEMPRE salva no banco como fallback)
         record = BlockchainRecord(
             tipo=tipo,
             data_hash=data_hash,
@@ -164,11 +165,12 @@ class BlockchainService:
         )
         db.add(record)
         db.commit()
+        db.refresh(record)
 
         # Se não está configurado, retorna como pending para processamento posterior
         if not self.is_configured:
-            logger.warning("Blockchain service não configurado - registro salvo como pending")
-            return TransactionStatus.PENDING, None, "Serviço não configurado - aguardando configuração"
+            logger.warning("Blockchain service não configurado - registro salvo como pending no banco")
+            return TransactionStatus.PENDING, None, "Registro salvo localmente - aguardando configuração do blockchain"
 
         try:
             # Converter hash hex para bytes32
@@ -178,11 +180,15 @@ class BlockchainService:
             nonce = self.w3.eth.get_transaction_count(self.account.address)
 
             # Estimar gas
-            gas_estimate = self.contract.functions.registerRecord(
-                hash_bytes,
-                tipo,
-                metadata
-            ).estimate_gas({"from": self.account.address})
+            try:
+                gas_estimate = self.contract.functions.registerRecord(
+                    hash_bytes,
+                    tipo,
+                    metadata
+                ).estimate_gas({"from": self.account.address})
+            except Exception as gas_error:
+                logger.warning(f"Erro ao estimar gas, usando limite padrão: {gas_error}")
+                gas_estimate = 150000
 
             # Construir transação com EIP-1559
             tx = self.contract.functions.registerRecord(
@@ -197,12 +203,25 @@ class BlockchainService:
                 "maxPriorityFeePerGas": self.w3.to_wei(settings.MAX_PRIORITY_FEE_GWEI, "gwei"),
             })
 
-            # Assinar e enviar
+            # Assinar transação
             signed_tx = self.w3.eth.account.sign_transaction(tx, settings.WALLET_PRIVATE_KEY)
-            tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+
+            # Compatibilidade com diferentes versões do web3.py
+            # Pode ser raw_transaction, rawTransaction, ou método serialize()
+            raw_tx = getattr(signed_tx, 'rawTransaction', None) or \
+                     getattr(signed_tx, 'raw_transaction', None)
+
+            if raw_tx is None and hasattr(signed_tx, 'serialize'):
+                raw_tx = signed_tx.serialize()
+
+            if raw_tx is None:
+                raise ValueError("Não foi possível obter raw transaction da transação assinada")
+
+            # Enviar transação
+            tx_hash = self.w3.eth.send_raw_transaction(raw_tx)
             tx_hash_hex = tx_hash.hex()
 
-            # Atualizar registro
+            # Atualizar registro com sucesso
             record.tx_hash = tx_hash_hex
             record.status = TransactionStatus.SUBMITTED.value
             record.submitted_at = datetime.utcnow()
@@ -213,14 +232,16 @@ class BlockchainService:
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Erro ao enviar transação: {error_msg}")
+            logger.error(f"Erro ao enviar transação (fallback para DB): {error_msg}")
 
-            record.status = TransactionStatus.FAILED.value
-            record.error_message = error_msg
-            record.retry_count += 1
+            # Fallback: mantém registro no banco com status pending para retry posterior
+            record.status = TransactionStatus.PENDING.value
+            record.error_message = f"Fallback DB: {error_msg}"
+            record.retry_count = (record.retry_count or 0) + 1
             db.commit()
 
-            return TransactionStatus.FAILED, None, error_msg
+            # Retorna PENDING em vez de FAILED para indicar que está salvo localmente
+            return TransactionStatus.PENDING, None, f"Registro salvo localmente (erro blockchain: {error_msg})"
 
     def check_transaction_status(
         self, tx_hash: str, db: Session

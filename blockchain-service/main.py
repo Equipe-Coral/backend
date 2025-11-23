@@ -166,8 +166,8 @@ async def blockas(
             "version": "1.0",
         })
 
-        # Registrar na blockchain
-        status, tx_hash, error = blockchain_service.register_hash(
+        # Registrar na blockchain (com fallback para banco de dados)
+        status, tx_hash, message = blockchain_service.register_hash(
             data_hash=data_hash,
             tipo=request.tipo.value,
             metadata=metadata,
@@ -175,12 +175,7 @@ async def blockas(
             original_data=prepared_data
         )
 
-        if status == TransactionStatus.FAILED:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Erro ao registrar na blockchain: {error}"
-            )
-
+        # Sempre retorna sucesso - mesmo com erro de blockchain, o registro foi salvo no banco
         return BlockasResponse(
             success=True,
             tipo=request.tipo,
@@ -189,14 +184,38 @@ async def blockas(
             status=status,
             block_number=None,
             network=blockchain_service.network_name,
-            message="Transação enviada" if tx_hash else "Registro salvo - aguardando configuração do serviço"
+            message=message or ("Transação enviada" if tx_hash else "Registro salvo localmente")
         )
 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Erro no endpoint /blockas: {e}")
-        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+        # Mesmo em erro inesperado, tenta salvar no banco
+        try:
+            record = BlockchainRecord(
+                tipo=request.tipo.value,
+                data_hash=data_hash if 'data_hash' in dir() else "error",
+                original_data={"error": str(e)},
+                network=blockchain_service.network_name,
+                contract_address=settings.CONTRACT_ADDRESS,
+                status=TransactionStatus.PENDING.value,
+                error_message=f"Erro inesperado: {str(e)}"
+            )
+            db.add(record)
+            db.commit()
+            return BlockasResponse(
+                success=True,
+                tipo=request.tipo,
+                data_hash=record.data_hash,
+                tx_hash=None,
+                status=TransactionStatus.PENDING,
+                block_number=None,
+                network=blockchain_service.network_name,
+                message=f"Registro salvo localmente (erro: {str(e)})"
+            )
+        except Exception:
+            raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 
 @app.get("/blockas/status/{tx_hash}", response_model=StatusResponse)
