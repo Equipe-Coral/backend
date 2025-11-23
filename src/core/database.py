@@ -26,4 +26,7 @@ def init_db():
     """
     # Import models here to ensure they are registered with Base
     from src.models.interaction import Interaction  # noqa
+    from src.models.user import User  # noqa
+    from src.models.conversation_state import ConversationState  # noqa
     Base.metadata.create_all(bind=engine)
+

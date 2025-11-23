@@ -11,3 +11,4 @@ faster-whisper
 python-multipart
 google-generativeai
 pydub
+geopy
