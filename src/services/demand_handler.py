@@ -276,6 +276,7 @@ async def _create_new_demand(
     Função auxiliar para criar uma nova demanda.
     """
     from src.services.demand_service import DemandService
+    from src.agents.detective import DetectiveAgent
 
     demand_service = DemandService()
     state_manager = ConversationStateManager()
@@ -293,6 +294,16 @@ async def _create_new_demand(
             'coordinates': None
         }
 
+    # NOVO: Buscar PLs relacionados à demanda
+    detective = DetectiveAgent()
+    related_pls = await detective.find_related_pls(
+        theme=classification.get('theme', 'outros'),
+        keywords=classification.get('keywords', []),
+        db=db
+    )
+    await detective.close()
+
+    # Criar demanda
     demand = await demand_service.create_demand(
         creator_id=user_id,
         title=demand_content['title'],
@@ -317,6 +328,15 @@ async def _create_new_demand(
 
     scope_emoji = {1: "📍", 2: "🏘️", 3: "🏙️"}
 
+    # Se encontrou PLs, informar o usuário
+    pl_info = ""
+    if related_pls:
+        pl_info = f"\n\n📋 **Já existe legislação sobre isso!**\n"
+        pl_info += f"Encontrei {len(related_pls)} PL(s) relacionado(s):\n"
+        for pl in related_pls[:2]:
+            pl_info += f"• {pl['title']}\n"
+        pl_info += "\n💡 Você pode apoiar esses PLs existentes!"
+
     response = f"""✅ Demanda criada com sucesso!
 
 **{demand_content['title']}**
@@ -326,7 +346,7 @@ async def _create_new_demand(
 🔹 Urgência: {classification.get('urgency', 'Média')}
 👥 Apoiadores: 1 (você)
 
-{demand_service.get_demand_link(demand.id)}
+{demand_service.get_demand_link(demand.id)}{pl_info}
 
 💡 Compartilhe para aumentar a pressão!"""
 

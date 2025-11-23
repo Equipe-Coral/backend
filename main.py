@@ -220,6 +220,18 @@ async def webhook(
                     db=db
                 )
 
+            # Tratamento de DUVIDA (perguntas sobre legislação)
+            elif classification_result.get('classification') == 'DUVIDA':
+                from src.services.question_handler import handle_question
+
+                response_text = await handle_question(
+                    user_id=str(user.id),
+                    phone=phone,
+                    text=text,
+                    classification=classification_result,
+                    db=db
+                )
+
             # Outros tipos de mensagem (OUTRO, etc.)
             else:
                 # Aqui poderia ter outros handlers (FAQ, informações, etc.)

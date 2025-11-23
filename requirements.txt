@@ -14,3 +14,4 @@ pydub
 geopy
 google-genai
 pgvector
+httpx

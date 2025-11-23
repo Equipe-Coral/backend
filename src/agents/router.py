@@ -26,7 +26,7 @@ Analise a mensagem do cidadão e retorne APENAS um JSON válido (sem markdown, s
 
 {{
   "classification": "ONBOARDING" | "DEMANDA" | "DUVIDA" | "OUTRO",
-  "theme": "saude" | "transporte" | "educacao" | "seguranca" | "meio_ambiente" | "zeladoria" | "outros",
+  "theme": "saude" | "transporte" | "educacao" | "seguranca" | "meio_ambiente" | "zeladoria" | "animais" | "consumidor" | "outros",
   "location_mentioned": true | false,
   "location_text": "texto extraído" ou null,
   "urgency": "critica" | "alta" | "media" | "baixa",
@@ -62,6 +62,8 @@ OUTRO (tudo que não se encaixa):
 - seguranca: polícia, violência, roubo, guarda
 - meio_ambiente: lixo, poluição, árvore, parque, reciclagem
 - zeladoria: buraco, iluminação, calçada, limpeza, manutenção
+- animais: cachorro, gato, pet, animal de estimação, proteção animal, maus-tratos
+- consumidor: restaurante, loja, comércio, estabelecimento, direito do consumidor, negócio
 - outros: se não se encaixa acima
 
 **URGÊNCIA:**
@@ -126,9 +128,10 @@ Responda APENAS com o JSON, sem texto adicional.
                              'reciclagem', 'coleta']
         }
         
-        duvida_words = ['o que é', 'o que e', 'como funciona', 'existe lei', 'pl ', 
+        duvida_words = ['o que é', 'o que e', 'como funciona', 'existe lei', 'pl ',
                        'projeto de lei', 'quem é', 'quem e', 'vereador', 'deputado',
-                       'como faço', 'como faco', 'posso', 'tenho direito']
+                       'como faço', 'como faco', 'posso', 'tenho direito', 'o que eu faço',
+                       'pode', 'proibiram', 'lei sobre']
         
         # 1. ONBOARDING (saudações simples)
         if any(word in text_lower for word in onboarding_words) and len(text_lower) < 30:
@@ -214,8 +217,8 @@ Responda APENAS com o JSON, sem texto adicional.
         if result['classification'] not in valid_classifications:
             return False
         
-        valid_themes = ['saude', 'transporte', 'educacao', 'seguranca', 
-                       'meio_ambiente', 'zeladoria', 'outros']
+        valid_themes = ['saude', 'transporte', 'educacao', 'seguranca',
+                       'meio_ambiente', 'zeladoria', 'animais', 'consumidor', 'outros']
         if result['theme'] not in valid_themes:
             return False
         
