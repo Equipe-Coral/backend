@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "postgresql://coral_user:senha123@localhost:5433/coral_blockchain"
 
     # Blockchain Settings - Ethereum Sepolia Testnet
-    SEPOLIA_RPC_URL: str = "https://rpc.sepolia.org"
+    # Use Alchemy/Infura para maior confiabilidade, ou o RPC público como fallback
+    SEPOLIA_RPC_URL: str = "https://ethereum-sepolia-rpc.publicnode.com"
     ETHEREUM_MAINNET_RPC_URL: str = "https://eth.llamarpc.com"
 
     # Usar testnet por padrão para desenvolvimento

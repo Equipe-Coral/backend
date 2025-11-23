@@ -52,7 +52,7 @@ services:
       # Database
       DATABASE_URL: "postgresql://coral_user:senha123@postgres-blockchain:5432/coral_blockchain"
       # Blockchain - Ethereum Sepolia Testnet
-      SEPOLIA_RPC_URL: "https://rpc.sepolia.org"
+      SEPOLIA_RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com"
       ETHEREUM_MAINNET_RPC_URL: "https://eth.llamarpc.com"
       USE_TESTNET: "true"
       # Wallet - Configure via .env ou secrets
