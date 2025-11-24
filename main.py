@@ -13,7 +13,7 @@ from src.core.state_manager import ConversationStateManager
 from src.services.onboarding_handler import handle_onboarding
 from src.services.demand_handler import handle_demand_creation
 # Importação completa dos Handlers para o roteamento de estado
-from src.services.demand_handler import handle_problem_confirmation, handle_create_demand_decision, handle_demand_choice, handle_demand_drafting # NOVO HANDLER AQUI
+from src.services.demand_handler import handle_problem_confirmation, handle_create_demand_decision, handle_demand_choice, handle_demand_drafting 
 from src.services.question_action_handler import handle_question_action_choice
 from src.services.demand_support_handler import handle_demand_support_choice
 from src.services.question_handler import handle_question
@@ -162,11 +162,11 @@ async def webhook(
             
             if current_state:
                 handler_map = {
-                    'drafting_demand': handle_demand_drafting, # NOVO: Loop de entrevista
+                    'drafting_demand': handle_demand_drafting,
                     'confirming_problem': handle_problem_confirmation,
                     'asking_create_demand': handle_create_demand_decision,
                     'choosing_similar_or_new': handle_demand_choice,
-                    'awaiting_demand_choice': handle_demand_choice,
+                    'awaiting_demand_choice': handle_demand_choice, # Mantido por compatibilidade
                     'choosing_demand_action_after_question': handle_question_action_choice,
                     'choosing_demand_to_support': handle_demand_support_choice,
                 }
@@ -184,19 +184,17 @@ async def webhook(
                         "db": db
                     }
                     
-                    # Chamada explícita por grupo de parâmetros
-                    if current_state.current_stage in ['drafting_demand']:
+                    # Chamada unificada baseada no tipo de input esperado
+                    if current_state.current_stage in ['drafting_demand', 'choosing_similar_or_new', 'awaiting_demand_choice', 'choosing_demand_to_support']:
+                        # Handlers que esperam o input principal como 'text' ou 'choice_text'
                         response_text = await handler(**common_args, text=text)
 
                     elif current_state.current_stage in ['confirming_problem', 'asking_create_demand']:
-                        # handle_problem_confirmation usa 'confirmation_text'
+                        # Handlers que esperam o input principal como 'confirmation_text'
                         response_text = await handler(**common_args, confirmation_text=text)
 
-                    elif current_state.current_stage in ['choosing_similar_or_new', 'awaiting_demand_choice', 'choosing_demand_to_support']:
-                        # handle_demand_choice / handle_demand_support_choice usam 'choice_text' ou 'text'
-                        response_text = await handler(**common_args, text=text)
-
                     elif current_state.current_stage == 'choosing_demand_action_after_question':
+                        # Handler que precisa de 'text' e 'user_location'
                          response_text = await handler(
                             **common_args,
                             text=text,

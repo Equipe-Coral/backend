@@ -6,6 +6,8 @@ from src.services.embedding_service import EmbeddingService
 from src.core.state_manager import ConversationStateManager
 from src.agents.analyst import AnalystAgent
 from src.agents.writer import WriterAgent
+from src.agents.detective import DetectiveAgent
+from src.agents.scribe import ScribeAgent
 import logging
 
 logger = logging.getLogger(__name__)
@@ -165,11 +167,10 @@ async def handle_problem_confirmation(
     ]
 
     if any(keyword in confirmation_lower for keyword in positive_keywords):
-        # ... (lógica de fluxo de pergunta ignorada para simplificar) ...
+        # A lógica para desvio de fluxo (from_question) foi mantida por compatibilidade
         from_question = state_context.get('from_question', False)
         
         if from_question:
-            # Lógica para usuários que vieram do fluxo de DÚVIDA e confirmaram
             analyst = AnalystAgent()
             classification = state_context.get('classification', {})
             user_location = state_context.get('user_location', {})
@@ -195,7 +196,6 @@ async def handle_problem_confirmation(
             # Normal flow - offer options including Legislative Idea
             state_manager.set_state(phone, 'asking_create_demand', state_context, db)
 
-            # Substitui string hardcoded por chamada ao WriterAgent
             return await writer.present_action_options(has_similar_demands=False)
 
     # Confirmação NEGATIVA
@@ -207,12 +207,10 @@ async def handle_problem_confirmation(
     if any(keyword in confirmation_lower for keyword in negative_keywords):
         state_manager.clear_state(phone, db)
 
-        # Substitui string hardcoded por chamada ao WriterAgent
         return await writer.ask_problem_rephrase()
 
     # Resposta não reconhecida
     else:
-        # Substitui string hardcoded por chamada ao WriterAgent
         return await writer.unclear_confirmation_request()
 
 
@@ -229,6 +227,9 @@ async def handle_create_demand_decision(
 
     state_manager = ConversationStateManager()
     writer = WriterAgent() # INSTANCIAÇÃO
+    # ScribeAgent é necessário para a Opção 2
+    from src.agents.scribe import ScribeAgent
+    
     decision_lower = decision_text.lower().strip()
 
     # Opção 1: CRIAR DEMANDA (Com busca de similares)
@@ -264,7 +265,6 @@ async def handle_create_demand_decision(
             ]
             state_manager.set_state(phone, 'choosing_similar_or_new', state_context, db)
 
-            # Substitui string hardcoded por chamada ao WriterAgent
             return await writer.show_similar_demands(
                 demands=state_context['similar_demands']
             )
@@ -285,7 +285,6 @@ async def handle_create_demand_decision(
         
         draft = await scribe.draft_legislative_idea(text_to_process)
         
-        # Substitui string hardcoded por chamada ao WriterAgent
         response = await writer.legislative_idea_ready(draft)
         
         state_manager.clear_state(phone, db)
@@ -295,12 +294,10 @@ async def handle_create_demand_decision(
     elif decision_lower in ['3', 'conversar', 'apenas conversar']:
         state_manager.clear_state(phone, db)
 
-        # Substitui string hardcoded por chamada ao WriterAgent
         return await writer.converse_only_message()
 
     # Resposta não reconhecida
     else:
-        # Substitui string hardcoded por chamada ao WriterAgent
         return await writer.unclear_decision_request()
 
 
@@ -361,7 +358,6 @@ async def _create_new_demand(
         {'title': pl['title'], 'url': pl['url']} for pl in related_pls[:2]
     ]
 
-    # Substitui string hardcoded por chamada ao WriterAgent
     response = await writer.demand_created(
         title=demand_content['title'],
         theme=classification.get('theme', 'Outros'),
@@ -406,13 +402,15 @@ async def handle_demand_choice(
 
             if was_added:
                 new_count = selected_demand['supporters_count'] + 1
-                # Substitui string hardcoded por chamada ao WriterAgent
                 response = await writer.demand_supported_success(
                     title=selected_demand['title'], new_count=new_count
                 )
             else:
-                # Substitui string hardcoded por chamada ao WriterAgent
-                response = await writer.demand_already_supported()
+                response = await writer.demand_already_supported(
+                    title=selected_demand['title'], 
+                    current_count=selected_demand['supporters_count']
+                )
+
 
             # Limpar estado
             state_manager.clear_state(phone, db)

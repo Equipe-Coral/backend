@@ -1,5 +1,6 @@
 from src.core.state_manager import ConversationStateManager
-from src.services.demand_handler import handle_create_demand_decision
+# Agora importamos handle_demand_creation diretamente para iniciar a entrevista
+from src.services.demand_handler import handle_demand_creation
 from sqlalchemy.orm import Session
 import logging
 import google.generativeai as genai
@@ -89,67 +90,54 @@ async def handle_question_action_choice(
     similar_demands_context = state_context.get('similar_demands', [])
     has_similar = len(similar_demands_context) > 0
     
-    # --- CONSOLIDATED CHOICES ---
-    
-    # Choices that lead to ACTING (Create Demand or Create Legislative Idea)
+    # --- CONSOLIDATED CHOICES (Mantido igual) ---
     act_choices = ['1', 'criar', 'nova', 'nova demanda', 'criar demanda', 'ideia', 'legislativa', 'criar ideia']
     if has_similar:
-        act_choices.append('3') # Option 3 when similar exist
+        act_choices.append('3') # Opção 3: Criar Ideia/Demanda
         view_choices = ['2', 'apoiar', 'ver', 'ver demandas', 'demandas existentes']
-        converse_choices = ['4', 'conversar', 'não', 'nao'] # Option 4 when similar exist
+        converse_choices = ['4', 'conversar', 'não', 'nao'] # Opção 4: Conversar
     else:
-        act_choices.append('2') # Option 2 when similar do not exist (Idea)
-        view_choices = [] # Not available
-        converse_choices = ['3', 'conversar', 'não', 'nao'] # Option 3 when similar do not exist
+        act_choices.append('2') # Opção 2: Criar Ideia/Demanda
+        view_choices = []
+        converse_choices = ['3', 'conversar', 'não', 'nao'] # Opção 3: Conversar
         
     try:
-        # Option 1, 2 (if no similar) or 3 (if similar exist) (Act: Create new demand OR Legislative Idea)
+        # Opção de Ação (1, 2 ou 3)
         if choice in act_choices:
             logger.info(f"✅ User chose to ACT via choice: {choice}")
 
-            # Reformulate the question into a proper demand statement
+            # 1. Reformular o texto original em uma demanda coerente
             original_question = state_context.get('original_question')
             theme = state_context.get('theme')
-            keywords = state_context.get('keywords', [])
             
-            logger.info(f"🔄 Reformulating question: '{original_question}'")
             reformulated_demand = await _reformulate_question_to_demand(
                 question=original_question,
                 theme=theme,
-                keywords=keywords
+                keywords=state_context.get('keywords', [])
             )
+            
+            # 2. INICIA O FLUXO DE ENTREVISTA DINÂMICA
+            # Limpa o estado atual antes de chamar o próximo handler principal (para evitar conflito de stages)
+            state_manager.clear_state(phone, db)
 
-            # Transition to demand creation flow
-            state_manager.set_state(
+            return await handle_demand_creation(
+                user_id=user_id,
                 phone=phone,
-                stage="confirming_problem",
-                context={
-                    "demand_content": reformulated_demand,
-                    "original_question": original_question,
-                    "classification": state_context.get('classification', {}),
-                    "theme": theme,
-                    "keywords": keywords,
-                    "user_location": user_location,
-                    "from_question": True,
-                },
+                text=reformulated_demand, # O texto inicial da demanda é a versão reformulada
+                classification=state_context.get('classification', {'theme': theme}),
+                user_location=user_location,
+                interaction_id=None, # Não tem interaction_id original para este fluxo
                 db=db
             )
 
-            # Use WriterAgent to ask for confirmation of the reformulated text
-            response = await writer.ask_confirmation_for_action(
-                theme=theme,
-                reformulated_demand=reformulated_demand
-            )
-
-            return response
-
-        # Option 2 (View and support similar demands - ONLY if has_similar is True)
+        # Opção de Ver/Apoiar Demanda (2 se houver similar)
         elif has_similar and choice in view_choices:
             logger.info("👥 User chose to view similar demands")
 
             demands_data = []
             available_demands_ids = []
             
+            # Lógica para carregar demandas e IDs (mantido igual)
             for demand_id in similar_demands_context:
                 demand = db.query(Demand).filter(Demand.id == demand_id).first()
                 if demand:
@@ -166,10 +154,8 @@ async def handle_question_action_choice(
                 state_manager.clear_state(phone, db)
                 return await writer.demand_not_found()
 
-            # Build response with demand details using WriterAgent
             response = await writer.show_similar_demands_for_support(demands=demands_data)
 
-            # Save state for handling support choice
             state_manager.set_state(
                 phone=phone,
                 stage="choosing_demand_to_support",
@@ -182,18 +168,17 @@ async def handle_question_action_choice(
 
             return response
         
-        # Option 3 or 4 (Converse)
+        # Opção de Conversar (3 ou 4)
         elif choice in converse_choices:
             logger.info("💬 User chose to continue conversation")
             state_manager.clear_state(phone, db)
 
             return await writer.converse_only_message()
 
-        # --- INVALID CHOICE ---
+        # --- ESCOLHA INVÁLIDA ---
         else:
             logger.warning(f"⚠️ Invalid choice from user: '{choice}'")
 
-            # Use WriterAgent for an appropriate error/guidance message
             return await writer.unclear_action_choice(has_similar=has_similar)
 
     except Exception as e:
