@@ -54,8 +54,6 @@ async def handle_demand_creation(
             return await writer.ask_for_more_details()
         elif missing == 'location_entity':
             return await writer.ask_for_specific_location(classification.get('theme'))
-        elif missing == 'urgency':
-            return await writer.ask_for_urgency()
     
     # Se estiver completo de primeira (raro, mas possível)
     return await _finalize_demand_draft(phone, context, db)
@@ -83,12 +81,21 @@ async def handle_demand_drafting(
     last_missing = state_context.get('missing_field')
     if last_missing == 'location_entity':
         state_context['collected_data']['location'] = text # Simplificação
+    elif last_missing == 'details':
+        if len(text.split()) >= 5:
+            state_context['collected_data']['details'] = text
     
     # 2. Re-analisar completude
     analysis = await analyst.analyze_completeness(
-        current_full_text, 
+        current_full_text,
         state_context.get('collected_data', {})
     )
+
+    # Proteção contra loop: se já coletamos detalhes, não marcar novamente
+    collected = state_context.get('collected_data', {})
+    if analysis.get('missing_field') == 'details' and 'details' in collected:
+        analysis['status'] = 'complete'
+        analysis['missing_field'] = None
 
     if analysis['status'] == 'incomplete':
         # Ainda falta algo -> Próxima pergunta
@@ -103,8 +110,6 @@ async def handle_demand_drafting(
         elif missing == 'location_entity':
             theme = state_context['classification'].get('theme')
             return await writer.ask_for_specific_location(theme)
-        elif missing == 'urgency':
-            return await writer.ask_for_urgency()
 
     # 3. Se completou -> Finalizar rascunho e pedir confirmação
     return await _finalize_demand_draft(phone, state_context, db)
@@ -112,33 +117,77 @@ async def handle_demand_drafting(
 
 async def _finalize_demand_draft(phone: str, context: dict, db: Session) -> str:
     """Gera o conteúdo final estruturado e pede confirmação"""
+    logger.info(f"Finalizing demand draft for {phone}. Context keys: {context.keys()}")
+    
     analyst = AnalystAgent()
     writer = WriterAgent()
+    from src.agents.validator import DemandValidatorAgent
     state_manager = ConversationStateManager()
 
-    # Determinar escopo final
-    scope_level = await analyst.determine_scope_level(
-        context['classification'], 
-        context['user_location']
+    # Verificar se já existe demand_content (caso tenha voltado de validação)
+    # Mas se o campo faltante era location_entity ou ainda há placeholder, forçar regeneração.
+    force_regenerate = False
+    if 'demand_content' in context:
+        existing = context['demand_content']
+        missing_field = context.get('missing_field')
+        has_placeholder = '[Nome da Rua]' in (existing.get('title','')) or '[Nome da Rua]' in (existing.get('description',''))
+        if missing_field == 'location_entity' or has_placeholder:
+            force_regenerate = True
+            logger.info("Forcing regeneration of demand_content due to location_entity resolution or placeholder detected.")
+
+    if 'demand_content' in context and 'scope_level' in context and not force_regenerate:
+        logger.info(f"Reusing existing demand_content from context")
+        final_content = context['demand_content']
+        scope_level = context['scope_level']
+    else:
+        # Determinar escopo final
+        scope_level = await analyst.determine_scope_level(
+            context['classification'], 
+            context['user_location']
+        )
+        logger.info(f"Determined scope level: {scope_level}")
+
+        # Gerar conteúdo estruturado com IA
+        final_content = await analyst.generate_demand_content(
+            context['full_text'],
+            context['classification'],
+            scope_level
+        )
+        logger.info(f"Generated demand content - Title: {final_content.get('title', 'N/A')}")
+
+    # Validação final (verificar se faltam dados críticos como rua/ponto específico)
+    validator = DemandValidatorAgent()
+    collected = context.get('collected_data', {})
+    review = validator.evaluate(
+        title=final_content.get('title', ''),
+        description=final_content.get('description', ''),
+        theme=context['classification'].get('theme', ''),
+        collected_data=collected,
+        full_text=context.get('full_text', '')
     )
 
-    # Gerar conteúdo estruturado com IA
-    final_content = await analyst.generate_demand_content(
-        context['full_text'],
-        context['classification'],
-        scope_level
-    )
+    if 'location_entity' in review.get('missing_fields', []):
+        # Reverter para drafting para coletar localização específica
+        # MAS manter o demand_content para não perdê-lo!
+        context['missing_field'] = 'location_entity'
+        context['demand_content'] = final_content
+        context['scope_level'] = scope_level
+        logger.info(f"Validation failed - missing location_entity. Returning to drafting but keeping demand_content")
+        state_manager.set_state(phone, 'drafting_demand', context, db)
+        return await writer.ask_for_missing_specific_location(context['classification'].get('theme', ''))
 
     # Atualizar contexto para o estágio de confirmação
     context['demand_content'] = final_content
     context['scope_level'] = scope_level
-    
+    logger.info(f"Saving state confirming_problem with demand_content: {final_content.get('title', 'N/A')}")
     state_manager.set_state(phone, 'confirming_problem', context, db)
 
     return await writer.confirm_final_demand(
         title=final_content['title'],
         desc=final_content['description'],
-        urgency=final_content.get('urgency_level', 'Média')
+        urgency=final_content.get('urgency_level', 'Média'),
+        scope_level=scope_level,
+        location=context.get('user_location')
     )
 
 
@@ -155,6 +204,8 @@ async def handle_problem_confirmation(
     Se não confirmado → pede para reformular
     """
 
+    logger.info(f"Processing problem confirmation for {phone}. State context keys: {state_context.keys()}")
+    
     state_manager = ConversationStateManager()
     writer = WriterAgent() # INSTANCIAÇÃO
     confirmation_lower = confirmation_text.lower().strip()
@@ -194,6 +245,13 @@ async def handle_problem_confirmation(
             )
         else:
             # Normal flow - offer options including Legislative Idea
+            # Certifica que demand_content e scope_level estão no contexto
+            if 'demand_content' not in state_context:
+                logger.warning(f"Missing demand_content in confirming_problem state for {phone}")
+                state_manager.clear_state(phone, db)
+                return "Ops! Houve um erro ao processar sua demanda. Vamos começar de novo. Por favor, descreva o problema que você gostaria de relatar."
+            
+            logger.info(f"Transitioning to asking_create_demand with demand_content: {state_context.get('demand_content', {}).get('title', 'N/A')}")
             state_manager.set_state(phone, 'asking_create_demand', state_context, db)
 
             return await writer.present_action_options(has_similar_demands=False)
@@ -225,6 +283,8 @@ async def handle_create_demand_decision(
     Processa a decisão de criar demanda, ideia legislativa ou apenas conversar.
     """
 
+    logger.info(f"Processing create demand decision for {phone}. Decision: {decision_text}. State context keys: {state_context.keys()}")
+    
     state_manager = ConversationStateManager()
     writer = WriterAgent() # INSTANCIAÇÃO
     # ScribeAgent é necessário para a Opção 2
@@ -234,6 +294,12 @@ async def handle_create_demand_decision(
 
     # Opção 1: CRIAR DEMANDA (Com busca de similares)
     if decision_lower in ['1', 'criar', 'demanda', 'criar demanda', 'uma demanda']:
+        # Validação: verificar se demand_content existe
+        if 'demand_content' not in state_context:
+            logger.error(f"Missing demand_content in state_context for {phone} at asking_create_demand")
+            state_manager.clear_state(phone, db)
+            return "Ops! Houve um erro ao processar sua demanda. Vamos começar de novo. Por favor, descreva o problema que você gostaria de relatar."
+        
         # ... (lógica de embedding e busca de similares) ...
         demand_content = state_context['demand_content']
         classification = state_context['classification']

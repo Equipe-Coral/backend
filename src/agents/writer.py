@@ -49,51 +49,89 @@ class WriterAgent:
     # MÉTODOS DO ONBOARDING
     # =========================================================================
     async def welcome_message(self, is_new_user: bool = True) -> str:
-        instruction = "Boas-vindas a novo usuário (pedir local) OU usuário recorrente (perguntar como ajudar)."
-        return await self._generate(instruction, {"is_new_user": is_new_user})
+        if is_new_user:
+            return (
+                "Olá! Sou o Coral, seu assistente cívico. 🌊\n\n"
+                "Estou aqui para ajudar você a resolver problemas do seu bairro e entender melhor as leis.\n\n"
+                "Para começarmos, *qual é o seu bairro e cidade?*"
+            )
+        return (
+            "Olá de novo! 👋\n\n"
+            "Como posso ajudar você hoje? Você pode me contar um problema do seu bairro ou tirar dúvidas sobre leis."
+        )
 
     async def ask_location_retry(self) -> str:
-        return await self._generate("Localização não entendida. Pedir Bairro e Cidade novamente com exemplos.")
+        return (
+            "Não consegui entender qual é o seu bairro e cidade. 🤔\n\n"
+            "Poderia escrever novamente? Exemplo: *Centro, São Paulo*."
+        )
 
     async def confirm_location(self, location: Dict = None, is_correct: bool = True) -> str:
         if not is_correct:
-            return await self._generate("Usuário disse algo confuso na confirmação. Pedir Sim ou Não.")
-        return await self._generate("Confirmar localização encontrada (Bairro, Cidade).", {"location": location})
+            return "Desculpe, não entendi. Por favor, responda apenas com *Sim* ou *Não*."
+        
+        neighborhood = location.get('neighborhood', '')
+        city = location.get('city', '')
+        state = location.get('state', '')
+        
+        return (
+            f"Entendi que você está em: *{neighborhood}, {city} - {state}*.\n\n"
+            "Está correto? (Responda *Sim* ou *Não*)"
+        )
 
     async def onboarding_complete(self) -> str:
-        return await self._generate("Cadastro concluído. Perguntar o que está acontecendo no bairro.")
+        return (
+            "Ótimo! Cadastro concluído. ✅\n\n"
+            "Agora me conte: *o que está acontecendo no seu bairro?* "
+            "Você pode relatar um problema (buraco, iluminação, etc.) ou sugerir uma melhoria."
+        )
 
     # =========================================================================
     # MÉTODOS DE DEMANDA E AÇÕES
     # =========================================================================
     async def confirm_demand_content(self, title, description, theme, scope_level, urgency) -> str:
-        return await self._generate(
-            "Resumir problema para confirmação (Título, Descrição, Tema). Pedir Sim/Não.",
-            {"title": title, "desc": description, "theme": theme}
+        return (
+            f"Entendi. Vamos confirmar se peguei tudo certo:\n\n"
+            f"📌 *Título:* {title}\n"
+            f"📝 *Descrição:* {description}\n"
+            f"🏷️ *Tema:* {theme}\n"
+            f"🚨 *Urgência:* {urgency}\n\n"
+            f"Essas informações estão corretas? Responda com *Sim* ou *Não*."
         )
 
     async def present_action_options(self, has_similar_demands: bool) -> str:
-        return await self._generate(
-            "Listar opções numeradas: 1. Criar Demanda, 2. Ideia Legislativa (ou Apoiar se houver similar), 3. Conversar.",
-            {"has_similar": has_similar}
+        options = (
+            "Como você gostaria de prosseguir?\n\n"
+            "1️⃣ *Criar uma Demanda*: Para relatar um problema e buscar solução.\n"
         )
+        if has_similar_demands:
+             options += "2️⃣ *Apoiar Demanda Existente*: Vi que já existem problemas parecidos.\n"
+        else:
+             options += "2️⃣ *Ideia Legislativa*: Transformar isso em uma sugestão de lei.\n"
+             
+        options += "3️⃣ *Apenas Conversar*: Tirar dúvidas ou falar mais sobre o assunto."
+        return options
 
     async def ask_problem_rephrase(self) -> str:
-        return await self._generate("Usuário disse que entendi errado. Pedir para explicar o problema de novo com detalhes.")
+        return "Tudo bem, entendi errado. 😅\n\nPoderia me explicar o problema novamente, com mais detalhes?"
 
     async def unclear_confirmation_request(self) -> str:
         return "Desculpe, não entendi. Por favor responda com *Sim* ou *Não*."
 
     async def show_similar_demands(self, demands: List[Dict]) -> str:
-        return await self._generate(
-            "Listar demandas similares encontradas. Pedir para escolher número para apoiar ou 'nova' para criar.",
-            {"demands": demands}
-        )
+        msg = "Encontrei algumas demandas parecidas com a sua. Veja se alguma delas é o que você quer relatar:\n\n"
+        for i, d in enumerate(demands, 1):
+            msg += f"*{i}.* {d.get('title')} ({d.get('supporters_count', 0)} apoios)\n"
+        
+        msg += "\nDigite o *número* da demanda para apoiar, ou digite *nova* para criar uma nova demanda."
+        return msg
 
     async def legislative_idea_ready(self, draft: Dict) -> str:
-        return await self._generate(
-            "Apresentar texto da Ideia Legislativa gerada e instruir como postar no e-Cidadania.",
-            {"draft": draft}
+        return (
+            "Aqui está uma sugestão de texto para sua Ideia Legislativa:\n\n"
+            f"📜 *{draft.get('title', 'Ideia Legislativa')}*\n\n"
+            f"{draft.get('description', '')}\n\n"
+            "Você pode copiar esse texto e postar no portal e-Cidadania!"
         )
 
     async def converse_only_message(self) -> str:
@@ -103,27 +141,39 @@ class WriterAgent:
         return "Não entendi. Digite o número da opção desejada."
 
     async def demand_created(self, title, theme, scope_level, urgency, share_link, related_pls) -> str:
-        return await self._generate(
-            "Sucesso na criação da demanda. Incentivar compartilhamento. Mostrar PLs relacionados se houver.",
-            {"title": title, "link": share_link, "pls": related_pls}
+        msg = (
+            f"🎉 Demanda *{title}* criada com sucesso!\n\n"
+            f"Compartilhe este link para conseguir mais apoios: {share_link}\n"
         )
+        if related_pls:
+            msg += "\nTambém encontrei alguns Projetos de Lei relacionados:\n"
+            for pl in related_pls:
+                msg += f"- {pl.get('title', 'PL')}\n"
+        return msg
 
     # =========================================================================
     # MÉTODOS DE DÚVIDAS (QUESTION HANDLER)
     # =========================================================================
     async def explain_pls_and_actions(self, theme: str, pls: List[Dict]) -> str:
-        return await self._generate(
-            "Explicar PLs encontrados sobre o tema. Listar opções de ação (Criar demanda, Apoiar existente).",
-            {"theme": theme, "pls": pls}
+        msg = f"Sobre o tema *{theme}*, encontrei os seguintes projetos:\n\n"
+        for pl in pls:
+            msg += f"📜 *{pl.get('title', 'Projeto')}*\n{pl.get('summary', '')[:100]}...\n\n"
+        
+        msg += (
+            "O que você deseja fazer?\n"
+            "1️⃣ Criar uma nova demanda sobre isso\n"
+            "2️⃣ Apoiar uma demanda existente"
         )
+        return msg
 
     # =========================================================================
     # MÉTODOS FALTANTES (QUE CAUSAVAM ERRO)
     # =========================================================================
     async def ask_confirmation_for_action(self, theme: str, reformulated_demand: str) -> str:
-        return await self._generate(
-            "Confirmar intenção de ação. Mostrar o tema e o texto reformulado. Pedir Sim/Não.",
-            {"theme": theme, "reformulated": reformulated_demand}
+        return (
+            f"Entendi que você quer falar sobre *{theme}*.\n\n"
+            f"Resumo: {reformulated_demand}\n\n"
+            "Podemos prosseguir com isso? (Sim/Não)"
         )
 
     async def demand_not_found(self) -> str:
@@ -133,10 +183,7 @@ class WriterAgent:
         return await self.show_similar_demands(demands) # Reutiliza lógica
 
     async def unclear_action_choice(self, has_similar: bool) -> str:
-        return await self._generate(
-            "Usuário escolheu opção inválida. Listar opções válidas novamente (números).",
-            {"has_similar": has_similar}
-        )
+        return "Opção inválida. Por favor, digite o *número* da opção desejada."
 
     async def ask_for_new_demand_description(self) -> str:
         return "Entendido! Vamos criar uma nova. Por favor, descreva o problema ou ideia com detalhes."
@@ -145,15 +192,15 @@ class WriterAgent:
         return f"Opção inválida. Digite um número de 1 a {num_options}, ou 'nova'."
 
     async def demand_already_supported(self, title: str = None, current_count: int = None) -> str:
-        return await self._generate(
-            "Informar que usuário já apoia essa demanda. Mostrar total de apoios.",
-            {"title": title, "count": current_count}
+        return (
+            f"Você já apoia a demanda *{title}*! 🙌\n"
+            f"Atualmente ela tem {current_count} apoios."
         )
 
     async def demand_supported_success(self, title: str, new_count: int) -> str:
-        return await self._generate(
-            "Sucesso ao apoiar demanda! Celebrar e mostrar novo total de apoios.",
-            {"title": title, "count": new_count}
+        return (
+            f"Sucesso! Você apoiou a demanda *{title}*. 🚀\n"
+            f"Agora ela conta com {new_count} apoios!"
         )
 
     async def generic_error_response(self) -> str:
@@ -164,29 +211,63 @@ class WriterAgent:
         return f"Parece que recebi uma {msg}. Poderia enviar novamente?"
 
     async def ask_for_help_options(self) -> str:
-        return await self._generate("Usuário enviou algo que não entendi (fora de contexto). Oferecer menu de ajuda (Demanda, Dúvida).")
+        return (
+            "Não entendi muito bem. 😕\n\n"
+            "Você pode:\n"
+            "1. Relatar um problema\n"
+            "2. Tirar uma dúvida sobre leis"
+        )
 
     # =========================================================================
     # MÉTODOS DE ENTREVISTA (DEMAND BUILDER)
     # =========================================================================
     
     async def ask_for_more_details(self) -> str:
-        return await self._generate(
-            "O relato do usuário está muito curto. Peça gentilmente mais detalhes. Pergunte 'O que exatamente aconteceu?' ou 'Há quanto tempo isso ocorre?'"
+        return (
+            "Preciso de um pouco mais de detalhes para entender bem o problema. 🕵️\n\n"
+            "O que exatamente aconteceu? Há quanto tempo isso ocorre?"
         )
 
     async def ask_for_specific_location(self, theme: str) -> str:
-        return await self._generate(
-            f"Precisamos saber o local exato para o tema {theme}. Pergunte o nome da rua, número, ou o nome do estabelecimento (escola, posto de saúde) afetado."
+        return (
+            f"Para resolvermos questões sobre *{theme}*, preciso saber o local exato. 📍\n\n"
+            "Qual é o nome da rua, número ou ponto de referência (ex: nome da escola ou posto de saúde)?"
+        )
+
+    async def ask_for_missing_specific_location(self, theme: str) -> str:
+        return (
+            f"Ainda falta o local exato para essa demanda de *{theme}*. 🔍\n\n"
+            "Por favor informe: nome da Rua/Avenida/Travessa + número ou ponto de referência (ex: 'Rua das Flores 120', 'Praça Central', 'Em frente à Escola X')."
         )
 
     async def ask_for_urgency(self) -> str:
-        return await self._generate(
-            "Precisamos definir a prioridade. Pergunte se isso oferece risco imediato à segurança/saúde ou se é uma solicitação de melhoria."
+        return (
+            "Qual é a urgência desse problema? 🚨\n\n"
+            "Isso oferece risco imediato à segurança ou saúde, ou é uma solicitação de melhoria?"
         )
     
-    async def confirm_final_demand(self, title: str, desc: str, urgency: str) -> str:
-        return await self._generate(
-            "Apresente o resumo final da demanda (Título, Descrição, Urgência). Pergunte se podemos registrar assim.",
-            {"title": title, "desc": desc, "urgency": urgency}
+    async def confirm_final_demand(self, title: str, desc: str, urgency: str, scope_level: int, location: Dict = None) -> str:
+        neighborhood = location.get('neighborhood') if location else None
+        city = location.get('city') if location else None
+        state = location.get('state') if location else None
+
+        scope_map = {
+            1: 'Local (bairro / ponto específico)',
+            2: 'Municipal / Urbano',
+            3: 'Amplo (regional / estadual / geral)'
+        }
+        scope_label = scope_map.get(scope_level, 'Indefinido')
+
+        location_str = ''
+        if neighborhood or city or state:
+            location_str = f"📍 *Local*: {neighborhood or ''}{', ' if neighborhood and city else ''}{city or ''}{' - ' if city and state else ''}{state or ''}\n"
+
+        return (
+            "Pronto! Aqui está o resumo da sua demanda:\n\n"
+            f"📌 *Título:* {title}\n"
+            f"📝 *Descrição:* {desc}\n"
+            f"🔎 *Escopo:* {scope_label}\n"
+            f"🚨 *Urgência (estimada):* {urgency}\n"
+            f"{location_str}"
+            "Posso registrar assim? (Responda *Sim* ou *Não*)"
         )

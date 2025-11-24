@@ -1,18 +1,4 @@
-# ========================================
-# Docker Compose - Coral Bot
-# ========================================
-# Iniciar apenas DB:
-#   docker compose --profile db up -d
-#
-# Iniciar Backend (FastAPI):
-#   docker compose --profile backend up -d
-#
-# Iniciar Blockchain:
-#   docker compose --profile blockchain up -d
-#
-# Iniciar tudo:
-#   docker compose --profile full up -d
-# ========================================
+version: "3.8"
 
 services:
   # ========================================
@@ -38,11 +24,6 @@ services:
     networks:
       - app_network
     restart: unless-stopped
-    profiles:
-      - db
-      - backend
-      - blockchain
-      - full
 
   # ========================================
   # Backend FastAPI (Coral Bot)
@@ -75,9 +56,27 @@ services:
     networks:
       - app_network
     restart: unless-stopped
-    profiles:
-      - backend
-      - full
+
+  # ========================================
+  # Serviço de Autenticação
+  # ========================================
+  auth:
+    build:
+      context: ./auth
+      dockerfile: auth-dev.dockerfile
+    container_name: coral-auth
+    environment:
+      - AUTH_APP_BASE_URL=http://localhost/api/auth
+    env_file:
+      - ./auth/.env
+    ports:
+      - "${AUTH_PORT:-8084}:${AUTH_PORT:-8084}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app_network
+    restart: unless-stopped
 
   # ========================================
   # Postgres Blockchain
@@ -95,15 +94,11 @@ services:
       - postgres_blockchain_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U coral_user -d coral_blockchain"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 5
     networks:
       - app_network
-    restart: unless-stopped
-    profiles:
-      - blockchain
-      - full
 
   # ========================================
   # Blockchain Service
@@ -115,6 +110,8 @@ services:
     container_name: coral-blockchain-service
     ports:
       - "8001:8001"
+    env_file:
+      - ./blockchain-service/.env
     environment:
       API_HOST: "0.0.0.0"
       API_PORT: "8001"
@@ -141,18 +138,13 @@ services:
     restart: unless-stopped
     networks:
       - app_network
-    profiles:
-      - blockchain
-      - full
 
 # ========================================
 # Volumes
 # ========================================
 volumes:
   postgres_data:
-    driver: local
   postgres_blockchain_data:
-    driver: local
 
 # ========================================
 # Networks

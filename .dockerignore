@@ -1,0 +1,90 @@
+# .dockerignore
+# Ignora arquivos desnecessários ao construir a imagem Docker
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments - MANTÉM venv/ COMENTADO PARA NÃO COPIAR
+venv/
+ENV/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+.docker-aliases*
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env.local
+.env.*.local
+
+# Documentation
+docs/
+*.md
+README.md
+DOCKER.md
+
+# Tests
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+temp/
+tmp/
+
+# Serviços externos (não copiar pastas de outros serviços)
+auth/
+blockchain-service/
+whatsapp-bot/
+
+# Backup files
+*.old
+*.bak
+docker-compose.old.yml

@@ -25,21 +25,28 @@ class AnalystAgent:
         LOCAL: {current_data.get('location', 'Não especificada')}
         
         VERIFIQUE SE FALTA ALGO CRÍTICO (apenas 1 por vez):
-        1. LOCAL_ESPECIFICO: Se o tema exige local (buraco, escola, ônibus), sabemos onde é?
-        2. URGENCIA: Sabemos se é urgente/grave?
-        3. DETALHES: O relato é muito curto (menos de 5 palavras) ou vago?
+        1. LOCAL_ESPECIFICO: Se o tema exige local (buraco, escola, iluminação, escola), sabemos onde é?
+        2. DETALHES: O relato é muito curto (menos de 5 palavras) ou vago?
+
+        Não pergunte nem sinalize urgência como campo faltante; se o texto indicar urgência, ignore para fins de completude.
 
         Retorne JSON:
         {{
             "status": "incomplete" ou "complete",
-            "missing_field": "location_entity" | "urgency" | "details" | null,
+            "missing_field": "location_entity" | "details" | null,
             "reason": "Explicação curta"
         }}
         """
         
         try:
             response_text = await self.client.generate_content(prompt) 
-            return self.client.parse_json(response_text)
+            result = self.client.parse_json(response_text)
+            # Sanitização: remover qualquer referência inesperada a 'urgency'
+            if isinstance(result, dict) and result.get('missing_field') == 'urgency':
+                result['missing_field'] = None
+                if result.get('status') == 'incomplete':
+                    result['status'] = 'complete'
+            return result
         except Exception as e:
             logger.error(f"Error in completeness analysis: {e}")
             return {"status": "complete", "missing_field": None} 

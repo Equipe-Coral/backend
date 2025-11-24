@@ -189,9 +189,13 @@ async def webhook(
                         # Handlers que esperam o input principal como 'text' ou 'choice_text'
                         response_text = await handler(**common_args, text=text)
 
-                    elif current_state.current_stage in ['confirming_problem', 'asking_create_demand']:
-                        # Handlers que esperam o input principal como 'confirmation_text'
+                    elif current_state.current_stage == 'confirming_problem':
+                        # Handler que espera 'confirmation_text'
                         response_text = await handler(**common_args, confirmation_text=text)
+
+                    elif current_state.current_stage == 'asking_create_demand':
+                        # Handler que espera 'decision_text'
+                        response_text = await handler(**common_args, decision_text=text)
 
                     elif current_state.current_stage == 'choosing_demand_action_after_question':
                         # Handler que precisa de 'text' e 'user_location'
