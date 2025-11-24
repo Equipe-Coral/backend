@@ -3,6 +3,7 @@ from src.models.demand import Demand
 from src.models.demand_supporter import DemandSupporter
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from src.agents.writer import WriterAgent # NOVO
 import logging
 
 logger = logging.getLogger(__name__)
@@ -21,19 +22,10 @@ async def handle_demand_support_choice(
     1. Parse user choice (number or 'nova')
     2. If number: add user as supporter to that demand
     3. If 'nova': redirect to demand creation flow
-
-    Args:
-        user_id: UUID of the user
-        phone: User's phone number
-        text: User's choice message
-        state_context: Context from conversation state with available_demands list
-        db: Database session
-
-    Returns:
-        Response message confirming support or redirecting to creation
     """
 
     state_manager = ConversationStateManager()
+    writer = WriterAgent() # INSTANCIAÇÃO
     choice = text.strip().lower()
 
     available_demands = state_context.get('available_demands', [])
@@ -57,11 +49,8 @@ async def handle_demand_support_choice(
                 db=db
             )
 
-            response = """📝 *Vamos criar uma nova demanda!*
-
-Por favor, descreva o problema ou reivindicação que você quer registrar."""
-
-            return response
+            # Substitui string hardcoded por chamada ao WriterAgent
+            return await writer.ask_for_new_demand_description()
 
         # Try to parse as number
         try:
@@ -69,10 +58,8 @@ Por favor, descreva o problema ou reivindicação que você quer registrar."""
 
             # Validate choice is within range
             if choice_number < 1 or choice_number > len(available_demands):
-                response = f"""❓ *Escolha inválida.*
-
-Por favor, digite um número entre 1 e {len(available_demands)}, ou digite *'nova'* para criar sua própria demanda."""
-                return response
+                # Substitui string hardcoded por chamada ao WriterAgent
+                return await writer.unclear_support_choice(num_options=len(available_demands))
 
             # Get the demand ID (convert to 0-indexed)
             demand_id = available_demands[choice_number - 1]
@@ -81,9 +68,10 @@ Por favor, digite um número entre 1 e {len(available_demands)}, ou digite *'nov
             demand = db.query(Demand).filter(Demand.id == demand_id).first()
             if not demand:
                 state_manager.clear_state(phone, db)
-                return "❌ Desculpe, essa demanda não existe mais. Tente novamente."
+                # Substitui string hardcoded por chamada ao WriterAgent
+                return await writer.demand_not_found()
 
-            # Check if user already supports this demand
+            # Check if user already supports this demand (for immediate response)
             existing_support = db.query(DemandSupporter).filter(
                 DemandSupporter.demand_id == demand_id,
                 DemandSupporter.user_id == user_id
@@ -91,14 +79,11 @@ Por favor, digite um número entre 1 e {len(available_demands)}, ou digite *'nov
 
             if existing_support:
                 state_manager.clear_state(phone, db)
-                response = f"""✅ *Você já apoia esta demanda!*
-
-*{demand.title}*
-
-💪 Total de apoiadores: {demand.supporters_count}
-
-Continue mobilizando mais pessoas! 🚀"""
-                return response
+                # Substitui string hardcoded por chamada ao WriterAgent
+                return await writer.demand_already_supported(
+                    title=demand.title, 
+                    current_count=demand.supporters_count
+                )
 
             # Add user as supporter
             try:
@@ -117,32 +102,28 @@ Continue mobilizando mais pessoas! 🚀"""
 
                 state_manager.clear_state(phone, db)
 
-                response = f"""🎉 *Parabéns! Você agora apoia esta demanda!*
-
-*{demand.title}*
-
-💪 Total de apoiadores: {demand.supporters_count}
-
-Quanto mais pessoas apoiarem, maior a pressão para resolver o problema! Compartilhe com amigos e vizinhos! 🚀"""
-
-                return response
+                # Substitui string hardcoded por chamada ao WriterAgent (Sucesso)
+                return await writer.demand_supported_success(
+                    title=demand.title, 
+                    new_count=demand.supporters_count
+                )
 
             except IntegrityError:
                 db.rollback()
                 state_manager.clear_state(phone, db)
-                return "❌ Você já apoia essa demanda!"
+                # Substitui string hardcoded por chamada ao WriterAgent (Fallback de erro de integridade)
+                return await writer.demand_already_supported(
+                    title=demand.title, 
+                    current_count=demand.supporters_count
+                )
 
         except ValueError:
-            # Not a number
-            response = f"""❓ *Não entendi sua escolha.*
-
-Por favor, digite o *número* da demanda que você quer apoiar (1, 2, 3...)
-Ou digite *'nova'* para criar sua própria demanda."""
-            return response
+            # Not a number and not 'nova'
+            # Substitui string hardcoded por chamada ao WriterAgent
+            return await writer.unclear_support_choice(num_options=len(available_demands))
 
     except Exception as e:
         logger.error(f"❌ Error handling demand support choice: {e}", exc_info=True)
         state_manager.clear_state(phone, db)
-        return """❌ Desculpe, tive um problema ao processar seu apoio.
-
-Por favor, tente novamente."""
+        # Substitui string hardcoded por chamada ao WriterAgent (Erro genérico)
+        return await writer.generic_error_response()

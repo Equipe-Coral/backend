@@ -4,24 +4,16 @@ from sqlalchemy.orm import Session
 import logging
 import google.generativeai as genai
 from src.core.config import settings
+from src.models.demand import Demand
+from src.services.similarity_service import SimilarityService
+from src.services.embedding_service import EmbeddingService
+from src.agents.writer import WriterAgent
 
 logger = logging.getLogger(__name__)
 
 async def _reformulate_question_to_demand(question: str, theme: str, keywords: list) -> str:
     """
     Use Gemini to reformulate a user's question into a proper demand statement
-    
-    Example transformation:
-    Input: "quais os PL que permitem eu entrar com meu cachorro no restaurante?"
-    Output: "Gostaria de uma legislação que permitisse entrar com animais de estimação em estabelecimentos comerciais"
-    
-    Args:
-        question: The user's original question
-        theme: The classified theme
-        keywords: Extracted keywords
-        
-    Returns:
-        Reformulated demand statement
     """
     logger.info(f"🔄 Starting reformulation: question='{question}', theme='{theme}', keywords={keywords}")
     
@@ -74,7 +66,6 @@ Agora reformule a pergunta do usuário:"""
     except Exception as e:
         logger.error(f"❌ Error reformulating question: {type(e).__name__}: {str(e)}", exc_info=True)
         logger.warning(f"⚠️ Falling back to original question due to error")
-        # Fallback: return original question
         return question
 
 async def handle_question_action_choice(
@@ -87,38 +78,34 @@ async def handle_question_action_choice(
 ) -> str:
     """
     Handle user's choice after seeing PLs and similar demands from a question
-
-    Flow:
-    1. Parse user choice (1, 2, or 3)
-    2. Route to appropriate action:
-       - 1: Start demand creation flow
-       - 2: Show similar demands for support
-       - 3: Continue conversational mode
-
-    Args:
-        user_id: UUID of the user
-        phone: User's phone number
-        text: User's choice message
-        state_context: Context from conversation state
-        user_location: User's location data
-        db: Database session
-
-    Returns:
-        Response message based on user's choice
     """
 
     state_manager = ConversationStateManager()
-    choice = text.strip()
+    writer = WriterAgent()
+    choice = text.strip().lower()
 
     logger.info(f"📋 Processing question action choice for user {user_id}: choice='{choice}'")
 
-    similar_demands = state_context.get('similar_demands', [])
-    has_similar = len(similar_demands) > 0
-
+    similar_demands_context = state_context.get('similar_demands', [])
+    has_similar = len(similar_demands_context) > 0
+    
+    # --- CONSOLIDATED CHOICES ---
+    
+    # Choices that lead to ACTING (Create Demand or Create Legislative Idea)
+    act_choices = ['1', 'criar', 'nova', 'nova demanda', 'criar demanda', 'ideia', 'legislativa', 'criar ideia']
+    if has_similar:
+        act_choices.append('3') # Option 3 when similar exist
+        view_choices = ['2', 'apoiar', 'ver', 'ver demandas', 'demandas existentes']
+        converse_choices = ['4', 'conversar', 'não', 'nao'] # Option 4 when similar exist
+    else:
+        act_choices.append('2') # Option 2 when similar do not exist (Idea)
+        view_choices = [] # Not available
+        converse_choices = ['3', 'conversar', 'não', 'nao'] # Option 3 when similar do not exist
+        
     try:
-        # Option 1: Create new demand
-        if choice in ['1', 'criar', 'nova', 'nova demanda', 'criar demanda']:
-            logger.info("✅ User chose to create new demand")
+        # Option 1, 2 (if no similar) or 3 (if similar exist) (Act: Create new demand OR Legislative Idea)
+        if choice in act_choices:
+            logger.info(f"✅ User chose to ACT via choice: {choice}")
 
             # Reformulate the question into a proper demand statement
             original_question = state_context.get('original_question')
@@ -133,51 +120,37 @@ async def handle_question_action_choice(
             )
 
             # Transition to demand creation flow
-            # Save state with reformulated demand
             state_manager.set_state(
                 phone=phone,
                 stage="confirming_problem",
                 context={
-                    "demand_content": reformulated_demand,  # Use reformulated version
-                    "original_question": original_question,  # Keep original for reference
+                    "demand_content": reformulated_demand,
+                    "original_question": original_question,
                     "classification": state_context.get('classification', {}),
                     "theme": theme,
                     "keywords": keywords,
-                    "user_location": user_location,  # Add user location
-                    "from_question": True  # Flag to indicate this came from question flow
+                    "user_location": user_location,
+                    "from_question": True,
                 },
                 db=db
             )
 
-            response = f"""📝 *Vamos criar uma demanda sobre "{theme}"*
-
-Deixa eu confirmar se entendi corretamente:
-
-*Demanda:* {reformulated_demand}
-
-Está correto? (Responda *sim* ou *não*)"""
+            # Use WriterAgent to ask for confirmation of the reformulated text
+            response = await writer.ask_confirmation_for_action(
+                theme=theme,
+                reformulated_demand=reformulated_demand
+            )
 
             return response
 
-        # Option 2: View and support similar demands
-        elif choice in ['2', 'apoiar', 'ver', 'ver demandas', 'demandas existentes']:
-            if not has_similar:
-                # User chose to just chat more (when no similar demands exist)
-                logger.info("💬 User chose to continue conversation")
-                state_manager.clear_state(phone, db)
-
-                response = """💬 *Entendi! Como posso ajudar mais?*
-
-Pode me contar mais sobre o que você precisa, ou fazer outra pergunta sobre legislação."""
-                return response
-
+        # Option 2 (View and support similar demands - ONLY if has_similar is True)
+        elif has_similar and choice in view_choices:
             logger.info("👥 User chose to view similar demands")
 
-            # Get demand details to show
-            from src.models.demand import Demand
-
             demands_data = []
-            for demand_id in similar_demands[:3]:
+            available_demands_ids = []
+            
+            for demand_id in similar_demands_context:
                 demand = db.query(Demand).filter(Demand.id == demand_id).first()
                 if demand:
                     demands_data.append({
@@ -187,86 +160,43 @@ Pode me contar mais sobre o que você precisa, ou fazer outra pergunta sobre leg
                         'supporters_count': demand.supporters_count,
                         'location': demand.location
                     })
+                    available_demands_ids.append(str(demand.id))
 
             if not demands_data:
                 state_manager.clear_state(phone, db)
-                return "❌ Desculpe, não consegui carregar as demandas. Tente novamente."
+                return await writer.demand_not_found()
 
-            # Build response with demand details
-            response = "🔍 *Aqui estão as demandas da comunidade relacionadas:*\n\n"
-
-            for i, demand in enumerate(demands_data, 1):
-                response += f"*{i}. {demand['title']}*\n"
-
-                # Truncate long descriptions
-                description = demand['description']
-                if len(description) > 150:
-                    description = description[:150] + '...'
-                response += f"{description}\n\n"
-
-                response += f"💪 {demand['supporters_count']} pessoas apoiam\n"
-                response += f"📍 {demand['location'].get('city', 'Local não especificado')}\n\n"
-                response += "---\n\n"
-
-            response += "*Quer apoiar alguma dessas demandas?*\n\n"
-            response += "Digite o *número* da demanda que você quer apoiar (1, 2, 3...)\n"
-            response += "Ou digite *'nova'* para criar sua própria demanda"
+            # Build response with demand details using WriterAgent
+            response = await writer.show_similar_demands_for_support(demands=demands_data)
 
             # Save state for handling support choice
             state_manager.set_state(
                 phone=phone,
                 stage="choosing_demand_to_support",
                 context={
-                    "available_demands": [d['id'] for d in demands_data],
+                    "available_demands": available_demands_ids,
                     "from_question": True
                 },
                 db=db
             )
 
             return response
+        
+        # Option 3 or 4 (Converse)
+        elif choice in converse_choices:
+            logger.info("💬 User chose to continue conversation")
+            state_manager.clear_state(phone, db)
 
-        # Option 3: Just continue conversation (only available when similar demands exist)
-        elif choice in ['3', 'conversar', 'não', 'nao']:
-            if has_similar:
-                logger.info("💬 User chose to continue conversation")
-                state_manager.clear_state(phone, db)
+            return await writer.converse_only_message()
 
-                response = """💬 *Entendi! Como posso ajudar mais?*
-
-Pode me contar mais sobre o que você precisa, ou fazer outra pergunta sobre legislação."""
-                return response
-            else:
-                # Invalid choice when only 2 options available
-                response = """❓ *Não entendi sua escolha.*
-
-Digite:
-1️⃣ para criar uma nova demanda
-2️⃣ para apenas conversar mais"""
-                return response
-
-        # Invalid choice
+        # --- INVALID CHOICE ---
         else:
             logger.warning(f"⚠️ Invalid choice from user: '{choice}'")
 
-            if has_similar:
-                response = """❓ *Não entendi sua escolha.*
-
-Digite:
-1️⃣ para criar uma nova demanda
-2️⃣ para ver e apoiar demandas existentes
-3️⃣ para apenas conversar mais"""
-            else:
-                response = """❓ *Não entendi sua escolha.*
-
-Digite:
-1️⃣ para criar uma nova demanda
-2️⃣ para apenas conversar mais"""
-
-            return response
+            # Use WriterAgent for an appropriate error/guidance message
+            return await writer.unclear_action_choice(has_similar=has_similar)
 
     except Exception as e:
         logger.error(f"❌ Error handling question action choice: {e}", exc_info=True)
         state_manager.clear_state(phone, db)
-        return """❌ Desculpe, tive um problema ao processar sua escolha.
-
-Por favor, tente novamente."""
+        return await writer.generic_error_response()

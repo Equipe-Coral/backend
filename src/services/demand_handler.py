@@ -5,6 +5,7 @@ from src.services.similarity_service import SimilarityService
 from src.services.embedding_service import EmbeddingService
 from src.core.state_manager import ConversationStateManager
 from src.agents.analyst import AnalystAgent
+from src.agents.writer import WriterAgent
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,57 +20,124 @@ async def handle_demand_creation(
     db: Session
 ) -> str:
     """
-    Orquestra criação de demanda com novo fluxo conversacional:
-    1. Determinar scope_level
-    2. Gerar título/descrição
-    3. CONFIRMAR ENTENDIMENTO com o usuário
-    4. Aguardar confirmação antes de processar
+    Inicia o fluxo de entrevista para criar uma demanda rica.
     """
-
-    analyst = AnalystAgent()
-    demand_service = DemandService()
-    embedding_service = EmbeddingService()
     state_manager = ConversationStateManager()
+    analyst = AnalystAgent()
+    writer = WriterAgent()
 
-    # 1. Determinar escopo
-    scope_level = await analyst.determine_scope_level(classification, user_location)
-
-    # 2. Gerar conteúdo estruturado
-    demand_content = await analyst.generate_demand_content(text, classification, scope_level)
-
-    # 3. CONFIRMAR ENTENDIMENTO - NOVO FLUXO
-    # Salvar contexto para próxima mensagem
+    # Inicializa o contexto da entrevista
     context = {
-        'stage': 'confirming_problem_understanding',
-        'demand_content': demand_content,
+        'full_text': text, # Acumula o texto de todas as respostas
         'classification': classification,
-        'scope_level': scope_level,
         'user_location': user_location,
         'interaction_id': interaction_id,
-        'original_text': text
+        'collected_data': {
+            'theme': classification.get('theme'),
+            'location': user_location.get('formatted_address')
+        }
     }
+
+    # 1. Analisar se já temos tudo na primeira mensagem
+    analysis = await analyst.analyze_completeness(text, context['collected_data'])
+    
+    if analysis['status'] == 'incomplete':
+        # Falta algo -> Inicia entrevista
+        missing = analysis['missing_field']
+        context['missing_field'] = missing
+        
+        state_manager.set_state(phone, 'drafting_demand', context, db)
+        
+        if missing == 'details':
+            return await writer.ask_for_more_details()
+        elif missing == 'location_entity':
+            return await writer.ask_for_specific_location(classification.get('theme'))
+        elif missing == 'urgency':
+            return await writer.ask_for_urgency()
+    
+    # Se estiver completo de primeira (raro, mas possível)
+    return await _finalize_demand_draft(phone, context, db)
+
+
+async def handle_demand_drafting(
+    user_id: str,
+    phone: str,
+    text: str,
+    state_context: dict,
+    db: Session
+) -> str:
+    """
+    Processa as respostas da entrevista (loop de perguntas).
+    """
+    analyst = AnalystAgent()
+    writer = WriterAgent()
+    state_manager = ConversationStateManager()
+
+    # 1. Atualizar contexto com a nova resposta
+    current_full_text = state_context.get('full_text', '') + "\n" + text
+    state_context['full_text'] = current_full_text
+    
+    # Atualiza dados específicos baseados no que foi perguntado
+    last_missing = state_context.get('missing_field')
+    if last_missing == 'location_entity':
+        state_context['collected_data']['location'] = text # Simplificação
+    
+    # 2. Re-analisar completude
+    analysis = await analyst.analyze_completeness(
+        current_full_text, 
+        state_context.get('collected_data', {})
+    )
+
+    if analysis['status'] == 'incomplete':
+        # Ainda falta algo -> Próxima pergunta
+        missing = analysis['missing_field']
+        state_context['missing_field'] = missing
+        
+        # Salva estado atualizado
+        state_manager.update_context(phone, state_context, db)
+        
+        if missing == 'details':
+            return await writer.ask_for_more_details()
+        elif missing == 'location_entity':
+            theme = state_context['classification'].get('theme')
+            return await writer.ask_for_specific_location(theme)
+        elif missing == 'urgency':
+            return await writer.ask_for_urgency()
+
+    # 3. Se completou -> Finalizar rascunho e pedir confirmação
+    return await _finalize_demand_draft(phone, state_context, db)
+
+
+async def _finalize_demand_draft(phone: str, context: dict, db: Session) -> str:
+    """Gera o conteúdo final estruturado e pede confirmação"""
+    analyst = AnalystAgent()
+    writer = WriterAgent()
+    state_manager = ConversationStateManager()
+
+    # Determinar escopo final
+    scope_level = await analyst.determine_scope_level(
+        context['classification'], 
+        context['user_location']
+    )
+
+    # Gerar conteúdo estruturado com IA
+    final_content = await analyst.generate_demand_content(
+        context['full_text'],
+        context['classification'],
+        scope_level
+    )
+
+    # Atualizar contexto para o estágio de confirmação
+    context['demand_content'] = final_content
+    context['scope_level'] = scope_level
+    
     state_manager.set_state(phone, 'confirming_problem', context, db)
 
-    # Montar mensagem de confirmação
-    scope_emoji = {1: "📍", 2: "🏘️", 3: "🏙️"}
-    theme_display = classification.get('theme', 'outros').replace('_', ' ').title()
-
-    response = f"""📝 Deixa eu confirmar se entendi corretamente:
-
-**{demand_content['title']}**
-
-{demand_content['description']}
-
-{scope_emoji.get(scope_level, "📍")} Escopo: Nível {scope_level}
-📋 Tema: {theme_display}
-🔹 Urgência: {classification.get('urgency', 'Média')}
-
-Entendi corretamente?
-
-✅ Digite *"sim"* para confirmar
-❌ Digite *"não"* para corrigir"""
-
-    return response
+    return await writer.confirm_final_demand(
+        title=final_content['title'],
+        desc=final_content['description'],
+        urgency=final_content.get('urgency_level', 'Média')
+    )
 
 
 async def handle_problem_confirmation(
@@ -81,11 +149,12 @@ async def handle_problem_confirmation(
 ) -> str:
     """
     Processa a confirmação do entendimento do problema.
-    Se confirmado → procede com criação (pulando step redundante se veio de question flow)
+    Se confirmado → oferece opções (Demanda, Ideia Legislativa, Conversar)
     Se não confirmado → pede para reformular
     """
 
     state_manager = ConversationStateManager()
+    writer = WriterAgent() # INSTANCIAÇÃO
     confirmation_lower = confirmation_text.lower().strip()
 
     # Confirmação POSITIVA
@@ -96,60 +165,38 @@ async def handle_problem_confirmation(
     ]
 
     if any(keyword in confirmation_lower for keyword in positive_keywords):
-        # Check if came from question flow
+        # ... (lógica de fluxo de pergunta ignorada para simplificar) ...
         from_question = state_context.get('from_question', False)
         
         if from_question:
-            # User came from question flow - skip "asking_create_demand" and proceed directly
-            logger.info("✅ User from question flow confirmed - proceeding directly to demand creation")
-            
-            # Need to analyze scope and generate full demand_content
+            # Lógica para usuários que vieram do fluxo de DÚVIDA e confirmaram
             analyst = AnalystAgent()
             classification = state_context.get('classification', {})
             user_location = state_context.get('user_location', {})
             
-            # Determine scope
             scope_level = await analyst.determine_scope_level(classification, user_location)
-            
-            # Get reformulated demand text
             demand_text = state_context.get('demand_content')
             
-            # Generate structured content
             demand_content = await analyst.generate_demand_content(
-                demand_text,
-                classification,
-                scope_level
+                demand_text, classification, scope_level
             )
             
-            # Update context
             state_context['scope_level'] = scope_level
             state_context['demand_content'] = demand_content
             
-            # Proceed directly to creation
             return await handle_create_demand_decision(
                 user_id=user_id,
                 phone=phone,
-                decision_text='1',  # Simulate "create" choice
+                decision_text='1',
                 state_context=state_context,
                 db=db
             )
         else:
-            # Normal flow - ask if want to create demand
+            # Normal flow - offer options including Legislative Idea
             state_manager.set_state(phone, 'asking_create_demand', state_context, db)
 
-            response = """Ótimo! 👍
-
-Agora você pode escolher:
-
-1️⃣ *Criar uma demanda* - Sua solicitação será registrada e outros cidadãos poderão apoiá-la
-2️⃣ *Apenas conversar* - Vou te ajudar sem criar um registro oficial
-
-O que você prefere?
-
-Digite *"1"* para criar a demanda
-Digite *"2"* para apenas conversar"""
-
-            return response
+            # Substitui string hardcoded por chamada ao WriterAgent
+            return await writer.present_action_options(has_similar_demands=False)
 
     # Confirmação NEGATIVA
     negative_keywords = [
@@ -160,27 +207,13 @@ Digite *"2"* para apenas conversar"""
     if any(keyword in confirmation_lower for keyword in negative_keywords):
         state_manager.clear_state(phone, db)
 
-        response = """Sem problemas! 😊
-
-Por favor, me conte novamente qual é o problema, com mais detalhes:
-
-💡 Dica: Seja específico sobre:
-- O que está acontecendo
-- Onde está acontecendo
-- Qual a urgência"""
-
-        return response
+        # Substitui string hardcoded por chamada ao WriterAgent
+        return await writer.ask_problem_rephrase()
 
     # Resposta não reconhecida
     else:
-        response = """Desculpe, não entendi. 🤔
-
-Por favor, confirme:
-
-✅ Digite *"sim"* se entendi corretamente
-❌ Digite *"não"* se preciso ajustar"""
-
-        return response
+        # Substitui string hardcoded por chamada ao WriterAgent
+        return await writer.unclear_confirmation_request()
 
 
 async def handle_create_demand_decision(
@@ -191,20 +224,16 @@ async def handle_create_demand_decision(
     db: Session
 ) -> str:
     """
-    Processa a decisão de criar ou não a demanda.
-    Se escolher criar → busca similares e oferece escolha
-    Se escolher apenas conversar → oferece ajuda conversacional
+    Processa a decisão de criar demanda, ideia legislativa ou apenas conversar.
     """
 
-    from src.services.similarity_service import SimilarityService
-    from src.services.embedding_service import EmbeddingService
-
     state_manager = ConversationStateManager()
+    writer = WriterAgent() # INSTANCIAÇÃO
     decision_lower = decision_text.lower().strip()
 
-    # Opção 1: CRIAR DEMANDA
-    if decision_lower in ['1', 'criar', 'demanda', 'criar demanda']:
-        # Agora sim: gerar embedding e buscar similares
+    # Opção 1: CRIAR DEMANDA (Com busca de similares)
+    if decision_lower in ['1', 'criar', 'demanda', 'criar demanda', 'uma demanda']:
+        # ... (lógica de embedding e busca de similares) ...
         demand_content = state_context['demand_content']
         classification = state_context['classification']
         scope_level = state_context['scope_level']
@@ -212,95 +241,67 @@ async def handle_create_demand_decision(
 
         embedding_service = EmbeddingService()
         similarity_service = SimilarityService()
-
-        # Gerar embedding  
+        
         text_for_embedding = embedding_service.prepare_text_for_embedding(
-            demand_content['title'],
-            demand_content['description'],
-            classification.get('theme', 'Outros')
+            demand_content['title'], demand_content['description'], classification.get('theme', 'Outros')
         )
         embedding = await embedding_service.generate_embedding(text_for_embedding)
 
-        # Buscar similares
         similar_demands = await similarity_service.find_similar_demands(
-            embedding=embedding,
-            theme=classification.get('theme', 'Outros'),
-            scope_level=scope_level,
-            user_location=user_location,
-            db=db,
-            similarity_threshold=0.80,
-            max_results=3
+            embedding=embedding, theme=classification.get('theme', 'Outros'),
+            scope_level=scope_level, user_location=user_location, db=db,
+            similarity_threshold=0.80, max_results=3
         )
 
         # Se encontrou similares → oferecer escolha
         if similar_demands:
             logger.info(f"Found {len(similar_demands)} similar demands for user {user_id}")
 
-            # Atualizar contexto com embedding e similares
             state_context['embedding'] = embedding
             state_context['similar_demands'] = [
-                {
-                    'id': d['id'],
-                    'title': d['title'],
-                    'similarity': d['similarity'],
-                    'supporters_count': d['supporters_count']
-                }
+                {'id': d['id'], 'title': d['title'], 'similarity': d['similarity'], 'supporters_count': d['supporters_count']}
                 for d in similar_demands
             ]
             state_manager.set_state(phone, 'choosing_similar_or_new', state_context, db)
 
-            # Montar mensagem com opções
-            response = "🔍 Encontrei demanda(s) similar(es) já criadas:\n\n"
-
-            for i, demand in enumerate(similar_demands[:3], 1):
-                similarity_pct = int(demand['similarity'] * 100)
-                response += f"{i}. **{demand['title']}**\n"
-                response += f"   👥 {demand['supporters_count']} apoiadores | "
-                response += f"📊 {similarity_pct}% similar\n\n"
-
-            response += "O que você prefere?\n\n"
-            response += "📌 Digite o *número* para apoiar uma demanda existente\n"
-            response += "🆕 Digite *'nova'* para criar sua própria demanda"
-
-            return response
+            # Substitui string hardcoded por chamada ao WriterAgent
+            return await writer.show_similar_demands(
+                demands=state_context['similar_demands']
+            )
 
         # Não encontrou similares → criar nova diretamente
         else:
             logger.info(f"No similar demands found, creating new demand for user {user_id}")
             return await _create_new_demand(
-                user_id=user_id,
-                phone=phone,
-                state_context=state_context,
-                embedding=embedding,
-                db=db
+                user_id=user_id, phone=phone, state_context=state_context,
+                embedding=embedding, db=db
             )
 
-    # Opção 2: APENAS CONVERSAR
-    elif decision_lower in ['2', 'conversar', 'apenas conversar']:
+    # Opção 2: CRIAR IDEIA LEGISLATIVA
+    elif decision_lower in ['2', 'ideia', 'legislativa', 'ideia legislativa', 'criar ideia']:
+        scribe = ScribeAgent()
+        demand_content = state_context.get('demand_content', {})
+        text_to_process = demand_content.get('description', '') or state_context.get('original_text', '')
+        
+        draft = await scribe.draft_legislative_idea(text_to_process)
+        
+        # Substitui string hardcoded por chamada ao WriterAgent
+        response = await writer.legislative_idea_ready(draft)
+        
+        state_manager.clear_state(phone, db)
+        return response
+
+    # Opção 3: APENAS CONVERSAR
+    elif decision_lower in ['3', 'conversar', 'apenas conversar']:
         state_manager.clear_state(phone, db)
 
-        response = """Entendido! 😊
-
-Estou aqui para te ajudar. Você pode:
-
-💬 Tirar dúvidas sobre leis e direitos
-📍 Pedir orientações sobre serviços públicos
-🤝 Conversar sobre questões da sua comunidade
-
-Como posso te ajudar?"""
-
-        return response
+        # Substitui string hardcoded por chamada ao WriterAgent
+        return await writer.converse_only_message()
 
     # Resposta não reconhecida
     else:
-        response = """Desculpe, não entendi. 🤔
-
-Por favor, escolha uma opção:
-
-1️⃣ Digite *"1"* para criar a demanda
-2️⃣ Digite *"2"* para apenas conversar"""
-
-        return response
+        # Substitui string hardcoded por chamada ao WriterAgent
+        return await writer.unclear_decision_request()
 
 
 async def _create_new_demand(
@@ -318,6 +319,7 @@ async def _create_new_demand(
 
     demand_service = DemandService()
     state_manager = ConversationStateManager()
+    writer = WriterAgent() # INSTANCIAÇÃO
 
     demand_content = state_context['demand_content']
     classification = state_context['classification']
@@ -327,32 +329,20 @@ async def _create_new_demand(
 
     demand_location = user_location
     if classification.get('location_mentioned') and classification.get('location_text'):
-        demand_location = {
-            'text': classification['location_text'],
-            'coordinates': None
-        }
+        demand_location = {'text': classification['location_text'], 'coordinates': None}
 
-    # Buscar PLs relacionados à demanda (usa scope_level para busca inteligente)
+    # Buscar PLs relacionados à demanda
     detective = DetectiveAgent()
     related_pls = await detective.find_related_pls(
-        theme=classification.get('theme', 'outros'),
-        keywords=classification.get('keywords', []),
-        db=db,
-        scope_level=scope_level,  # Uses demand's scope level for intelligent routing
-        location=user_location
+        theme=classification.get('theme', 'outros'), keywords=classification.get('keywords', []),
+        db=db, scope_level=scope_level, location=user_location
     )
-    await detective.close()
 
     # Criar demanda
     demand = await demand_service.create_demand(
-        creator_id=user_id,
-        title=demand_content['title'],
-        description=demand_content['description'],
-        scope_level=scope_level,
-        theme=classification.get('theme', 'Outros'),
-        location=demand_location,
-        affected_entity=demand_content.get('affected_entity'),
-        urgency=classification.get('urgency', 'Média'),
+        creator_id=user_id, title=demand_content['title'], description=demand_content['description'],
+        scope_level=scope_level, theme=classification.get('theme', 'Outros'), location=demand_location,
+        affected_entity=demand_content.get('affected_entity'), urgency=classification.get('urgency', 'Média'),
         db=db
     )
 
@@ -365,30 +355,21 @@ async def _create_new_demand(
 
     # Limpar estado
     state_manager.clear_state(phone, db)
+    
+    # Preparar dados do PL para o WriterAgent
+    pl_details = [
+        {'title': pl['title'], 'url': pl['url']} for pl in related_pls[:2]
+    ]
 
-    scope_emoji = {1: "📍", 2: "🏘️", 3: "🏙️"}
-
-    # Se encontrou PLs, informar o usuário
-    pl_info = ""
-    if related_pls:
-        pl_info = f"\n\n📋 **Já existe legislação sobre isso!**\n"
-        pl_info += f"Encontrei {len(related_pls)} PL(s) relacionado(s):\n"
-        for pl in related_pls[:2]:
-            pl_info += f"• {pl['title']}\n"
-        pl_info += "\n💡 Você pode apoiar esses PLs existentes!"
-
-    response = f"""✅ Demanda criada com sucesso!
-
-**{demand_content['title']}**
-
-{scope_emoji.get(scope_level, "📍")} Escopo: Nível {scope_level}
-📋 Tema: {classification.get('theme', 'Outros')}
-🔹 Urgência: {classification.get('urgency', 'Média')}
-👥 Apoiadores: 1 (você)
-
-{demand_service.get_demand_link(demand.id)}{pl_info}
-
-💡 Compartilhe para aumentar a pressão!"""
+    # Substitui string hardcoded por chamada ao WriterAgent
+    response = await writer.demand_created(
+        title=demand_content['title'],
+        theme=classification.get('theme', 'Outros'),
+        scope_level=scope_level,
+        urgency=classification.get('urgency', 'Média'),
+        share_link=demand_service.get_demand_link(demand.id),
+        related_pls=pl_details
+    )
 
     return response
 
@@ -406,41 +387,39 @@ async def handle_demand_choice(
 
     demand_service = DemandService()
     state_manager = ConversationStateManager()
+    writer = WriterAgent() # INSTANCIAÇÃO
 
     choice_lower = choice_text.lower().strip()
+    similar_demands = state_context.get('similar_demands', [])
 
     # Opção 1: Apoiar demanda existente
     if choice_lower.isdigit():
         choice_num = int(choice_lower)
-        similar_demands = state_context.get('similar_demands', [])
 
         if 1 <= choice_num <= len(similar_demands):
             selected_demand = similar_demands[choice_num - 1]
 
             # Adicionar como apoiador
             was_added = await demand_service.add_supporter(
-                demand_id=selected_demand['id'],
-                user_id=user_id,
-                db=db
+                demand_id=selected_demand['id'], user_id=user_id, db=db
             )
 
             if was_added:
                 new_count = selected_demand['supporters_count'] + 1
-                response = f"""✅ Você agora apoia esta demanda!
-
-**{selected_demand['title']}**
-
-👥 Total de apoiadores: {new_count}
-
-💪 Quanto mais gente apoiar, maior a pressão!"""
+                # Substitui string hardcoded por chamada ao WriterAgent
+                response = await writer.demand_supported_success(
+                    title=selected_demand['title'], new_count=new_count
+                )
             else:
-                response = "⚠️ Você já apoia esta demanda!"
+                # Substitui string hardcoded por chamada ao WriterAgent
+                response = await writer.demand_already_supported()
 
             # Limpar estado
             state_manager.clear_state(phone, db)
             return response
         else:
-            return f"❌ Opção inválida. Digite um número de 1 a {len(similar_demands)}, ou 'nova' para criar sua própria demanda."
+            # Opção inválida (número fora do range)
+            return await writer.unclear_support_choice(num_options=len(similar_demands))
 
     # Opção 2: Criar nova demanda
     elif 'nova' in choice_lower or 'criar' in choice_lower:
@@ -449,12 +428,10 @@ async def handle_demand_choice(
 
         # Criar nova demanda
         return await _create_new_demand(
-            user_id=user_id,
-            phone=phone,
-            state_context=state_context,
-            embedding=embedding,
-            db=db
+            user_id=user_id, phone=phone, state_context=state_context,
+            embedding=embedding, db=db
         )
 
     else:
-        return "❌ Não entendi. Digite o número da demanda para apoiar, ou 'nova' para criar sua própria."
+        # Resposta não reconhecida
+        return await writer.unclear_support_choice(num_options=len(similar_demands))

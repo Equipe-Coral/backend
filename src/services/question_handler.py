@@ -3,6 +3,7 @@ from src.agents.detective import DetectiveAgent
 from src.services.similarity_service import SimilarityService
 from src.services.embedding_service import EmbeddingService
 from src.core.state_manager import ConversationStateManager
+from src.agents.writer import WriterAgent  # NOVO
 from sqlalchemy.orm import Session
 import logging
 
@@ -17,14 +18,15 @@ async def handle_question(
     db: Session
 ) -> str:
     """
-    Processa dúvidas do usuário buscando legislação via Gemini (DetectiveAgent).
+    Processa dúvidas do usuário buscando legislação via Gemini (DetectiveAgent)
+    e formatando a resposta final com o WriterAgent.
     """
 
-    # Instancia os serviços
+    # Instancia os serviços e agentes
     detective = DetectiveAgent()
-    embedding_service = EmbeddingService()
     state_manager = ConversationStateManager()
-
+    writer = WriterAgent()  # INSTANCIAÇÃO
+    
     theme = classification.get('theme', 'outros')
     raw_keywords = classification.get('keywords', [])
 
@@ -37,59 +39,23 @@ async def handle_question(
     logger.info(f"❓ Processing question for user {user_id}: theme={theme}")
 
     try:
-        # 1. Buscar legislação usando o Detective (agora via Gemini)
+        # 1. Buscar legislação usando o Detective
         pls = await detective.find_related_pls(
             theme=theme,
             keywords=search_keywords,
             db=db,
-            scope_level=3, # Macro/Federal
+            scope_level=3,  # Macro/Federal
             location=user_location,
             user_message=text
         )
 
-        # === CONSTRUIR RESPOSTA ===
-        response = ""
-        response += f"🔍 *Busquei informações sobre: {theme.replace('_', ' ').title()}*\n\n"
+        # 2. Gerar a resposta completa (PLs e Opções) usando WriterAgent
+        response = await writer.explain_pls_and_actions(
+            theme=theme,
+            pls=pls
+        )
 
-        # 1. Mostrar Legislação
-        if pls:
-            response += f"📜 *Encontrei {len(pls)} leis ou projetos relacionados:*\n\n"
-
-            for pl in pls:
-                # Ícone baseado na fonte
-                icon = "🏛️"
-                if "Senado" in pl.get('source', ''): icon = "🏢"
-                elif "Municipal" in pl.get('source', ''): icon = "🏡"
-                
-                # Título e Link
-                url = pl.get('url') or '#'
-                response += f"{icon} *[{pl['title']}]({url})*\n"
-                
-                # Descrição concisa
-                summary = pl.get('summary') or pl.get('ementa', '')
-                response += f"_{summary}_\n"
-
-                # Status
-                status = pl.get('status', 'Ativo')
-                response += f"📊 Status: {status}\n\n"
-
-            # REMOVIDO: response += "---\n" (O traço foi retirado)
-            response += "\n" # Apenas um espaço extra
-        else:
-            response += _build_no_legislation_message(theme, search_keywords)
-            # REMOVIDO: response += "\n---\n" (O traço foi retirado)
-            response += "\n\n"
-
-        # 2. Botões de Ação com Explicação
-        response += "*O que deseja fazer?*\n\n"
-        
-        response += "1️⃣ *Criar nova demanda sobre isso*\n"
-        response += "_(Para registrar o problema e iniciar uma mobilização)_\n\n"
-        
-        response += "2️⃣ *Apoiar demandas existentes*\n"
-        response += "_(Para fortalecer pedidos já feitos pela comunidade)_"
-
-        # Salvar Estado
+        # 3. Salvar Estado (para a próxima escolha do usuário)
         state_manager.set_state(
             phone=phone,
             stage="choosing_demand_action_after_question",
@@ -98,7 +64,9 @@ async def handle_question(
                 "classification": classification,
                 "found_pls": len(pls) > 0,
                 "original_question": text,
-                "keywords": search_keywords
+                "keywords": search_keywords,
+                # Salva PLs para referência futura no action_handler se necessário
+                "pls": [{'title': p.get('title'), 'url': p.get('url')} for p in pls]
             },
             db=db
         )
@@ -107,10 +75,9 @@ async def handle_question(
 
     except Exception as e:
         logger.error(f"❌ Error handling question: {e}", exc_info=True)
-        return "❌ Desculpe, tive um problema técnico ao analisar sua dúvida. Tente novamente."
+        # Resposta de erro genérica via WriterAgent
+        return await writer.generic_error_response()
 
     finally:
+        # Fecha conexões se necessário (mantido do código original)
         await detective.close()
-
-def _build_no_legislation_message(theme: str, keywords: List[str]) -> str:
-    return "📚 *Não encontrei leis específicas sobre isso no momento.*\n⚠️ O tema pode ser muito recente ou regulado por normas locais."

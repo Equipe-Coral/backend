@@ -8,10 +8,15 @@ from src.models.user import User
 from src.services import whisper_service
 from src.agents.router import RouterAgent
 from src.agents.profiler import ProfilerAgent
+from src.agents.writer import WriterAgent
 from src.core.state_manager import ConversationStateManager
 from src.services.onboarding_handler import handle_onboarding
 from src.services.demand_handler import handle_demand_creation
-from src.models.demand import Demand
+# Importação completa dos Handlers para o roteamento de estado
+from src.services.demand_handler import handle_problem_confirmation, handle_create_demand_decision, handle_demand_choice, handle_demand_drafting # NOVO HANDLER AQUI
+from src.services.question_action_handler import handle_question_action_choice
+from src.services.demand_support_handler import handle_demand_support_choice
+from src.services.question_handler import handle_question
 import uvicorn
 import uuid
 import os
@@ -24,12 +29,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Coral Bot Backend")
-
-class WebhookMessage(BaseModel):
-    from_: str = Field(..., alias="from")
-    body: str
-    timestamp: int
-    message_type: str = "text"
 
 class WebhookResponse(BaseModel):
     response: str
@@ -54,6 +53,7 @@ async def webhook(
     audio_duration = None
     phone = None
     msg_type = None
+    writer = WriterAgent()
     
     try:
         content_type = request.headers.get("content-type", "")
@@ -75,12 +75,11 @@ async def webhook(
             temp_path = os.path.join("/tmp", temp_filename) if os.name != 'nt' else os.path.join(os.getenv('TEMP', '/tmp'), temp_filename)
             
             try:
-                # Write file
                 content = await audio_file.read()
                 with open(temp_path, "wb") as f:
                     f.write(content)
                 
-                # Get duration
+                # Get duration (mantido do código original)
                 try:
                     audio = AudioSegment.from_file(temp_path)
                     current_duration = len(audio) / 1000.0
@@ -92,6 +91,10 @@ async def webhook(
                 # Transcribe
                 text = await whisper_service.transcribe_audio(temp_path)
                 logger.info(f"Transcription: {text}")
+
+                # Edge Case 1: Empty Transcription
+                if not text or not text.strip():
+                    return WebhookResponse(response=await writer.empty_message_response(is_audio=True))
                 
             finally:
                 if os.path.exists(temp_path):
@@ -105,9 +108,9 @@ async def webhook(
             text = data.get("body")
             msg_type = data.get("message_type", "text")
             
-            # Validate
-            if not phone or not text:
-                 raise HTTPException(status_code=400, detail="Missing from or body")
+            # Edge Case 2: Empty Text Message
+            if not phone or not text or not text.strip():
+                 return WebhookResponse(response=await writer.empty_message_response(is_audio=False))
                  
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported Content-Type: {content_type}")
@@ -124,7 +127,7 @@ async def webhook(
         user = await profiler.check_user_exists(phone, db)
         current_state = state_manager.get_state(phone, db)
         
-        # 4. SALVAR INTERAÇÃO (LOG) - MOVIDO PARA ANTES DO ROTEAMENTO
+        # 4. SALVAR INTERAÇÃO (LOG)
         interaction = Interaction(
             phone=phone,
             user_id=user.id if user else None,
@@ -154,119 +157,91 @@ async def webhook(
         else:
             logger.info(f"Routing to Active/Demand Flow for {phone}")
 
-            # PRIORIDADE 1: Verifica se existe um estado de conversa específico (multi-turn)
-            # Estados devem ser verificados ANTES da classificação da mensagem atual
+            # --- PRIORIDADE 1: FLUXO DE ESTADO (MULTI-TURN) ---
+            response_text = None
+            
+            if current_state:
+                handler_map = {
+                    'drafting_demand': handle_demand_drafting, # NOVO: Loop de entrevista
+                    'confirming_problem': handle_problem_confirmation,
+                    'asking_create_demand': handle_create_demand_decision,
+                    'choosing_similar_or_new': handle_demand_choice,
+                    'awaiting_demand_choice': handle_demand_choice,
+                    'choosing_demand_action_after_question': handle_question_action_choice,
+                    'choosing_demand_to_support': handle_demand_support_choice,
+                }
+                
+                handler = handler_map.get(current_state.current_stage)
+                
+                if handler:
+                    logger.info(f"Handling state: {current_state.current_stage}")
+                    
+                    # Argumentos comuns para todos os handlers
+                    common_args = {
+                        "user_id": str(user.id),
+                        "phone": phone,
+                        "state_context": current_state.context_data,
+                        "db": db
+                    }
+                    
+                    # Chamada explícita por grupo de parâmetros
+                    if current_state.current_stage in ['drafting_demand']:
+                        response_text = await handler(**common_args, text=text)
 
-            # Estado 1: Confirmando entendimento do problema
-            if current_state and current_state.current_stage == 'confirming_problem':
-                from src.services.demand_handler import handle_problem_confirmation
-                response_text = await handle_problem_confirmation(
-                    user_id=str(user.id),
-                    phone=phone,
-                    confirmation_text=text,
-                    state_context=current_state.context_data,
-                    db=db
-                )
+                    elif current_state.current_stage in ['confirming_problem', 'asking_create_demand']:
+                        # handle_problem_confirmation usa 'confirmation_text'
+                        response_text = await handler(**common_args, confirmation_text=text)
 
-            # Estado 2: Perguntando se quer criar demanda ou apenas conversar
-            elif current_state and current_state.current_stage == 'asking_create_demand':
-                from src.services.demand_handler import handle_create_demand_decision
-                response_text = await handle_create_demand_decision(
-                    user_id=str(user.id),
-                    phone=phone,
-                    decision_text=text,
-                    state_context=current_state.context_data,
-                    db=db
-                )
+                    elif current_state.current_stage in ['choosing_similar_or_new', 'awaiting_demand_choice', 'choosing_demand_to_support']:
+                        # handle_demand_choice / handle_demand_support_choice usam 'choice_text' ou 'text'
+                        response_text = await handler(**common_args, text=text)
 
-            # Estado 3: Escolhendo entre demandas similares ou criar nova
-            elif current_state and current_state.current_stage == 'choosing_similar_or_new':
-                from src.services.demand_handler import handle_demand_choice
-                response_text = await handle_demand_choice(
-                    user_id=str(user.id),
-                    phone=phone,
-                    choice_text=text,
-                    state_context=current_state.context_data,
-                    db=db
-                )
+                    elif current_state.current_stage == 'choosing_demand_action_after_question':
+                         response_text = await handler(
+                            **common_args,
+                            text=text,
+                            user_location=user.location_primary
+                        )
+                        
+            # --- PRIORIDADE 2: SEM ESTADO ATIVO OU RESPOSTA PENDENTE ---
+            
+            if not response_text:
+                
+                classification = classification_result.get('classification')
 
-            # Estado 4: (Legado) Escolhendo demanda similar - mantido para compatibilidade
-            elif current_state and current_state.current_stage == 'awaiting_demand_choice':
-                from src.services.demand_handler import handle_demand_choice
-                response_text = await handle_demand_choice(
-                    user_id=str(user.id),
-                    phone=phone,
-                    choice_text=text,
-                    state_context=current_state.context_data,
-                    db=db
-                )
+                # Tratamento de ONBOARDING (Saudação) para usuário ativo
+                if classification == 'ONBOARDING':
+                    logger.info(f"Active user greeting: {user.id}")
+                    response_text = await writer.welcome_message(is_new_user=False)
 
-            # Estado 5: Escolhendo ação após ver PLs de uma dúvida
-            elif current_state and current_state.current_stage == 'choosing_demand_action_after_question':
-                from src.services.question_action_handler import handle_question_action_choice
-                response_text = await handle_question_action_choice(
-                    user_id=str(user.id),
-                    phone=phone,
-                    text=text,
-                    state_context=current_state.context_data,
-                    user_location=user.location_primary,
-                    db=db
-                )
+                # Tratamento de DEMANDA (inicia novo fluxo de criação dinâmica)
+                elif classification == 'DEMANDA':
+                    response_text = await handle_demand_creation(
+                        user_id=str(user.id), phone=phone, text=text,
+                        classification=classification_result, user_location=user.location_primary,
+                        interaction_id=str(interaction.id), db=db
+                    )
 
-            # Estado 6: Escolhendo qual demanda apoiar após ver lista
-            elif current_state and current_state.current_stage == 'choosing_demand_to_support':
-                from src.services.demand_support_handler import handle_demand_support_choice
-                response_text = await handle_demand_support_choice(
-                    user_id=str(user.id),
-                    phone=phone,
-                    text=text,
-                    state_context=current_state.context_data,
-                    db=db
-                )
+                # Tratamento de DUVIDA (perguntas sobre legislação)
+                elif classification == 'DUVIDA':
+                    response_text = await handle_question(
+                        user_id=str(user.id), phone=phone, text=text,
+                        classification=classification_result, user_location=user.location_primary,
+                        db=db
+                    )
 
-            # PRIORIDADE 2: Sem estado ativo → processar baseado na classificação
-
-            # Tratamento de ONBOARDING para usuário ativo (saudação)
-            elif classification_result.get('classification') == 'ONBOARDING':
-                logger.info(f"Active user greeting: {user.id}")
-                response_text = "Oi! 👋 Já nos conhecemos 😊\n\nComo posso te ajudar hoje?\n\n💡 Dica: Você pode relatar problemas do seu bairro ou tirar dúvidas sobre leis!"
-
-            # Tratamento de DEMANDA (inicia novo fluxo de criação)
-            elif classification_result.get('classification') == 'DEMANDA':
-                response_text = await handle_demand_creation(
-                    user_id=str(user.id),
-                    phone=phone,
-                    text=text,
-                    classification=classification_result,
-                    user_location=user.location_primary,
-                    interaction_id=str(interaction.id),
-                    db=db
-                )
-
-            # Tratamento de DUVIDA (perguntas sobre legislação)
-            elif classification_result.get('classification') == 'DUVIDA':
-                from src.services.question_handler import handle_question
-
-                response_text = await handle_question(
-                    user_id=str(user.id),
-                    phone=phone,
-                    text=text,
-                    classification=classification_result,
-                    user_location=user.location_primary,
-                    db=db
-                )
-
-            # Outros tipos de mensagem (OUTRO, etc.)
-            else:
-                # Aqui poderia ter outros handlers (FAQ, informações, etc.)
-                response_text = "Entendi. Como posso ajudar?\n\n💡 Você pode relatar problemas do seu bairro ou tirar dúvidas sobre serviços públicos!"
+                # Outros tipos de mensagem (OUTRO, interrupção de fluxo sem resposta)
+                else:
+                    logger.warning(f"Unrecognized classification or fallback for active user: {classification}")
+                    # Fallback com opções
+                    response_text = await writer.ask_for_help_options()
 
         return WebhookResponse(response=response_text)
 
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
-        # Retorna erro genérico mas não derruba o webhook do whatsapp
-        return WebhookResponse(response="Desculpe, tive um erro interno. Tente novamente mais tarde.")
+        # Retorna erro genérico usando WriterAgent
+        return WebhookResponse(response=await writer.generic_error_response())
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host=settings.API_HOST, port=settings.API_PORT, reload=True)

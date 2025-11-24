@@ -12,12 +12,10 @@ class RouterAgent:
     async def classify_and_extract(self, text: str) -> dict:
         """
         Classifica mensagem do usuário
-        
         Retorna classificação com fallback heurístico se API falhar
         """
         
         # FALLBACK HEURÍSTICO (antes de chamar API)
-        # Se API estiver com rate limit, usar regras simples
         heuristic_result = self._heuristic_classification(text)
         
         prompt = f"""Você é um assistente de classificação cívica no Brasil.
@@ -40,7 +38,8 @@ ONBOARDING (saudações, mensagens vagas sem problema concreto):
 - "oi", "olá", "bom dia", "opa"
 - Perguntas genéricas: "o que você faz?", "pode me ajudar?"
 
-DEMANDA (problema concreto que precisa ação):
+DEMANDA (problema concreto OU intenção explícita de criar registro):
+- Intenção direta: "criar uma demanda", "nova demanda", "quero reclamar", "registrar ocorrência", "abrir chamado"
 - Reclamações sobre serviços públicos: "buraco na rua", "lixo acumulado", "falta médico"
 - Problemas de infraestrutura: "iluminação", "asfalto", "calçada"
 - Transporte: "ônibus atrasado", "linha cancelada"
@@ -56,14 +55,14 @@ OUTRO (tudo que não se encaixa):
 - Spam, propaganda
 
 **TEMAS:**
-- saude: UBS, hospital, médico, remédio, consulta
-- transporte: ônibus, metrô, trem, ciclovia, rua, trânsito
-- educacao: escola, creche, professor, merenda
-- seguranca: polícia, violência, roubo, guarda
-- meio_ambiente: lixo, poluição, árvore, parque, reciclagem
-- zeladoria: buraco, iluminação, calçada, limpeza, manutenção
+- saude: UBS, hospital, médico, remédio, consulta, dengue
+- transporte: ônibus, metrô, trem, ciclovia, rua, trânsito, multa
+- educacao: escola, creche, professor, merenda, aula
+- seguranca: polícia, violência, roubo, guarda, assalto
+- meio_ambiente: lixo, poluição, árvore, parque, reciclagem, enchente
+- zeladoria: buraco, iluminação, calçada, limpeza, manutenção, obra
 - animais: cachorro, gato, pet, animal de estimação, proteção animal, maus-tratos
-- consumidor: restaurante, loja, comércio, estabelecimento, direito do consumidor, negócio
+- consumidor: restaurante, loja, comércio, estabelecimento, direito do consumidor
 - outros: se não se encaixa acima
 
 **URGÊNCIA:**
@@ -81,10 +80,8 @@ Responda APENAS com o JSON, sem texto adicional.
             response_text = await self.client.generate_content(prompt)
             result = self.client.parse_json(response_text)
             
-            # Validações
             if not self._is_valid_result(result):
                 logger.warning(f"Invalid classification from Gemini: {result}")
-                logger.info(f"Using heuristic fallback for: {text}")
                 return heuristic_result
                 
             logger.info(f"Classification: {result}")
@@ -92,14 +89,10 @@ Responda APENAS com o JSON, sem texto adicional.
             
         except Exception as e:
             error_msg = str(e)
-            
-            # Se for rate limit (429), usar heurística
             if "429" in error_msg or "Resource exhausted" in error_msg:
                 logger.warning(f"⚠️ Gemini rate limit hit. Using heuristic classification.")
-                logger.info(f"Heuristic result: {heuristic_result}")
                 return heuristic_result
             
-            # Outros erros
             logger.error(f"Error in RouterAgent: {e}")
             return heuristic_result
 
@@ -110,6 +103,23 @@ Responda APENAS com o JSON, sem texto adicional.
         """
         text_lower = text.lower().strip()
         
+        # 1. DEMANDA EXPLÍCITA (Novo)
+        explicit_demand_triggers = [
+            'criar demanda', 'criar uma demanda', 'nova demanda', 
+            'fazer reclamação', 'fazer reclamacao', 'quero reclamar',
+            'registrar problema', 'abrir chamado', 'denunciar'
+        ]
+        if any(trigger in text_lower for trigger in explicit_demand_triggers):
+            return {
+                "classification": "DEMANDA",
+                "theme": "outros", # Tema será definido na entrevista
+                "location_mentioned": False,
+                "location_text": None,
+                "urgency": "media",
+                "keywords": ["nova demanda"],
+                "confidence": 0.95
+            }
+
         # Palavras-chave por categoria
         onboarding_words = ['oi', 'olá', 'ola', 'bom dia', 'boa tarde', 'boa noite', 
                            'opa', 'e aí', 'e ai', 'oie', 'olar']
@@ -133,7 +143,7 @@ Responda APENAS com o JSON, sem texto adicional.
                        'como faço', 'como faco', 'posso', 'tenho direito', 'o que eu faço',
                        'pode', 'proibiram', 'lei sobre']
         
-        # 1. ONBOARDING (saudações simples)
+        # 2. ONBOARDING (saudações simples)
         if any(word in text_lower for word in onboarding_words) and len(text_lower) < 30:
             return {
                 "classification": "ONBOARDING",
@@ -145,7 +155,7 @@ Responda APENAS com o JSON, sem texto adicional.
                 "confidence": 0.8
             }
         
-        # 2. DÚVIDA (perguntas)
+        # 3. DÚVIDA (perguntas)
         if any(word in text_lower for word in duvida_words):
             return {
                 "classification": "DUVIDA",
@@ -157,7 +167,7 @@ Responda APENAS com o JSON, sem texto adicional.
                 "confidence": 0.7
             }
         
-        # 3. DEMANDA (problema concreto)
+        # 4. DEMANDA (problema concreto)
         for theme, keywords in demanda_keywords.items():
             matched_keywords = [kw for kw in keywords if kw in text_lower]
             if matched_keywords:
@@ -177,7 +187,6 @@ Responda APENAS com o JSON, sem texto adicional.
                         location_mentioned = True
                         break
                 
-                # Urgência baseada em palavras-chave
                 urgency = "media"
                 if any(w in text_lower for w in ['urgente', 'grave', 'perigo', 'risco']):
                     urgency = "alta"
@@ -194,7 +203,7 @@ Responda APENAS com o JSON, sem texto adicional.
                     "confidence": 0.75
                 }
         
-        # 4. OUTRO (fallback)
+        # 5. OUTRO (fallback)
         return {
             "classification": "OUTRO",
             "theme": "outros",
@@ -206,7 +215,6 @@ Responda APENAS com o JSON, sem texto adicional.
         }
 
     def _is_valid_result(self, result: dict) -> bool:
-        """Valida estrutura do resultado"""
         required_keys = ['classification', 'theme', 'location_mentioned', 
                         'urgency', 'keywords', 'confidence']
         
@@ -215,11 +223,6 @@ Responda APENAS com o JSON, sem texto adicional.
         
         valid_classifications = ['ONBOARDING', 'DEMANDA', 'DUVIDA', 'OUTRO']
         if result['classification'] not in valid_classifications:
-            return False
-        
-        valid_themes = ['saude', 'transporte', 'educacao', 'seguranca',
-                       'meio_ambiente', 'zeladoria', 'animais', 'consumidor', 'outros']
-        if result['theme'] not in valid_themes:
             return False
         
         return True
