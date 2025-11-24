@@ -17,6 +17,75 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - app_network
+
+  # ========================================
+  # Blockchain Service
+  # ========================================
+  postgres-blockchain:
+    image: postgres:16
+    container_name: coral-postgres-blockchain
+    environment:
+      POSTGRES_USER: coral_user
+      POSTGRES_PASSWORD: senha123
+      POSTGRES_DB: coral_blockchain
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_blockchain_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coral_user -d coral_blockchain"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app_network
+
+  blockchain-service:
+    build:
+      context: ./blockchain-service
+      dockerfile: Dockerfile
+    container_name: coral-blockchain-service
+    ports:
+      - "8001:8001"
+    env_file:
+      - ./blockchain-service/.env
+    environment:
+      # API
+      API_HOST: "0.0.0.0"
+      API_PORT: "8001"
+      # Database (URL da blockchain)
+      DATABASE_URL: "postgresql://coral_user:senha123@postgres-blockchain:5432/coral_blockchain"
+      # Blockchain - Ethereum Sepolia Testnet
+      SEPOLIA_RPC_URL: "https://ethereum-sepolia-rpc.publicnode.com"
+      ETHEREUM_MAINNET_RPC_URL: "https://eth.llamarpc.com"
+      USE_TESTNET: "true"
+      # Gas
+      GAS_LIMIT: "200000"
+      MAX_PRIORITY_FEE_GWEI: "2.0"
+      MAX_FEE_GWEI: "10.0"
+      # Security
+      CIVIC_ID_SALT: "coral_civic_id"
+      # Nota: WALLET_PRIVATE_KEY, WALLET_ADDRESS e CONTRACT_ADDRESS
+      # são carregados do arquivo ./blockchain-service/.env via env_file
+    depends_on:
+      postgres-blockchain:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - app_network
 
 volumes:
   postgres_data:
+  postgres_blockchain_data:
+
+networks:
+  app_network:
+    driver: bridge
