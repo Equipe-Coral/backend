@@ -1,5 +1,6 @@
 from sqlalchemy import Column, String, Text, Integer, DateTime, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID, JSONB
+from pgvector.sqlalchemy import Vector
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from src.core.database import Base
@@ -19,6 +20,7 @@ class Demand(Base):
     urgency = Column(String(20), nullable=False)
     supporters_count = Column(Integer, default=1)
     status = Column(String(50), default='active')
+    embedding = Column(Vector(768))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

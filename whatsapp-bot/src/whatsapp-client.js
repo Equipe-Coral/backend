@@ -40,12 +40,12 @@ class WhatsappBot {
         });
 
         this.client.on('message', async msg => {
-            const allowedNumber = process.env.ALLOWED_NUMBER;
-            const senderNumber = msg.from.replace('@c.us', '');
+            const allowedNumbers = process.env.ALLOWED_NUMBER ? process.env.ALLOWED_NUMBER.split(',').map(n => n.trim()) : [];
+            const senderNumber = msg.from.split('@')[0];
             
             console.log(`MESSAGE RECEIVED from ${senderNumber}:`, msg.type);
 
-            if (allowedNumber && senderNumber !== allowedNumber) {
+            if (allowedNumbers.length > 0 && !allowedNumbers.includes(senderNumber)) {
                 console.log(`Ignored message from ${senderNumber} (not allowed)`);
                 return;
             }

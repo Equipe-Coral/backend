@@ -8,10 +8,15 @@ from src.models.user import User
 from src.services import whisper_service
 from src.agents.router import RouterAgent
 from src.agents.profiler import ProfilerAgent
+from src.agents.writer import WriterAgent
 from src.core.state_manager import ConversationStateManager
 from src.services.onboarding_handler import handle_onboarding
 from src.services.demand_handler import handle_demand_creation
-from src.models.demand import Demand
+# Importação completa dos Handlers para o roteamento de estado
+from src.services.demand_handler import handle_problem_confirmation, handle_create_demand_decision, handle_demand_choice, handle_demand_drafting 
+from src.services.question_action_handler import handle_question_action_choice
+from src.services.demand_support_handler import handle_demand_support_choice
+from src.services.question_handler import handle_question
 import uvicorn
 import uuid
 import os
@@ -24,12 +29,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Coral Bot Backend")
-
-class WebhookMessage(BaseModel):
-    from_: str = Field(..., alias="from")
-    body: str
-    timestamp: int
-    message_type: str = "text"
 
 class WebhookResponse(BaseModel):
     response: str
@@ -54,6 +53,7 @@ async def webhook(
     audio_duration = None
     phone = None
     msg_type = None
+    writer = WriterAgent()
     
     try:
         content_type = request.headers.get("content-type", "")
@@ -75,12 +75,11 @@ async def webhook(
             temp_path = os.path.join("/tmp", temp_filename) if os.name != 'nt' else os.path.join(os.getenv('TEMP', '/tmp'), temp_filename)
             
             try:
-                # Write file
                 content = await audio_file.read()
                 with open(temp_path, "wb") as f:
                     f.write(content)
                 
-                # Get duration
+                # Get duration (mantido do código original)
                 try:
                     audio = AudioSegment.from_file(temp_path)
                     current_duration = len(audio) / 1000.0
@@ -92,6 +91,10 @@ async def webhook(
                 # Transcribe
                 text = await whisper_service.transcribe_audio(temp_path)
                 logger.info(f"Transcription: {text}")
+
+                # Edge Case 1: Empty Transcription
+                if not text or not text.strip():
+                    return WebhookResponse(response=await writer.empty_message_response(is_audio=True))
                 
             finally:
                 if os.path.exists(temp_path):
@@ -105,9 +108,9 @@ async def webhook(
             text = data.get("body")
             msg_type = data.get("message_type", "text")
             
-            # Validate
-            if not phone or not text:
-                 raise HTTPException(status_code=400, detail="Missing from or body")
+            # Edge Case 2: Empty Text Message
+            if not phone or not text or not text.strip():
+                 return WebhookResponse(response=await writer.empty_message_response(is_audio=False))
                  
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported Content-Type: {content_type}")
@@ -124,7 +127,7 @@ async def webhook(
         user = await profiler.check_user_exists(phone, db)
         current_state = state_manager.get_state(phone, db)
         
-        # 4. SALVAR INTERAÇÃO (LOG) - MOVIDO PARA ANTES DO ROTEAMENTO
+        # 4. SALVAR INTERAÇÃO (LOG)
         interaction = Interaction(
             phone=phone,
             user_id=user.id if user else None,
@@ -153,46 +156,90 @@ async def webhook(
         # FLUXO B: Usuário Ativo (Já cadastrado)
         else:
             logger.info(f"Routing to Active/Demand Flow for {phone}")
+
+            # --- PRIORIDADE 1: FLUXO DE ESTADO (MULTI-TURN) ---
+            response_text = None
             
-            # Tratamento de ONBOARDING para usuário ativo
-            if classification_result.get('classification') == 'ONBOARDING':
-                logger.info(f"Active user greeting: {user.id}")
-                response_text = "Oi! 👋 Já nos conhecemos 😊\n\nComo posso te ajudar hoje?\n\n💡 Dica: Você pode relatar problemas do seu bairro ou tirar dúvidas sobre leis!"
+            if current_state:
+                handler_map = {
+                    'drafting_demand': handle_demand_drafting,
+                    'confirming_problem': handle_problem_confirmation,
+                    'asking_create_demand': handle_create_demand_decision,
+                    'choosing_similar_or_new': handle_demand_choice,
+                    'awaiting_demand_choice': handle_demand_choice, # Mantido por compatibilidade
+                    'choosing_demand_action_after_question': handle_question_action_choice,
+                    'choosing_demand_to_support': handle_demand_support_choice,
+                }
+                
+                handler = handler_map.get(current_state.current_stage)
+                
+                if handler:
+                    logger.info(f"Handling state: {current_state.current_stage}")
+                    
+                    # Argumentos comuns para todos os handlers
+                    common_args = {
+                        "user_id": str(user.id),
+                        "phone": phone,
+                        "state_context": current_state.context_data,
+                        "db": db
+                    }
+                    
+                    # Chamada unificada baseada no tipo de input esperado
+                    if current_state.current_stage in ['drafting_demand', 'choosing_similar_or_new', 'awaiting_demand_choice', 'choosing_demand_to_support']:
+                        # Handlers que esperam o input principal como 'text' ou 'choice_text'
+                        response_text = await handler(**common_args, text=text)
 
-            # Verifica se existe um estado de conversa específico (ex: respondendo a uma pergunta do bot)
-            # Se não houver estado, assume fluxo padrão de demanda
-            elif current_state and current_state.current_stage != 'processing_demand':
-                 # Se tivéssemos fluxos multi-turn para demandas complexas, trataríamos aqui
-                 pass
-                 # Fallback para demanda se não tiver handler específico
-                 response_text = await handle_demand_creation(
-                    user_id=str(user.id),
-                    phone=phone,
-                    text=text,
-                    classification=classification_result,
-                    user_location=user.location_primary,
-                    interaction_id=str(interaction.id),
-                    db=db
-                )
+                    elif current_state.current_stage in ['confirming_problem', 'asking_create_demand']:
+                        # Handlers que esperam o input principal como 'confirmation_text'
+                        response_text = await handler(**common_args, confirmation_text=text)
 
-            else:
-                # Chama o Handler de Demandas (CRIAÇÃO DE DEMANDA ACONTECE AQUI)
-                response_text = await handle_demand_creation(
-                    user_id=str(user.id),
-                    phone=phone,
-                    text=text,
-                    classification=classification_result,
-                    user_location=user.location_primary,
-                    interaction_id=str(interaction.id),
-                    db=db
-                )
+                    elif current_state.current_stage == 'choosing_demand_action_after_question':
+                        # Handler que precisa de 'text' e 'user_location'
+                         response_text = await handler(
+                            **common_args,
+                            text=text,
+                            user_location=user.location_primary
+                        )
+                        
+            # --- PRIORIDADE 2: SEM ESTADO ATIVO OU RESPOSTA PENDENTE ---
+            
+            if not response_text:
+                
+                classification = classification_result.get('classification')
+
+                # Tratamento de ONBOARDING (Saudação) para usuário ativo
+                if classification == 'ONBOARDING':
+                    logger.info(f"Active user greeting: {user.id}")
+                    response_text = await writer.welcome_message(is_new_user=False)
+
+                # Tratamento de DEMANDA (inicia novo fluxo de criação dinâmica)
+                elif classification == 'DEMANDA':
+                    response_text = await handle_demand_creation(
+                        user_id=str(user.id), phone=phone, text=text,
+                        classification=classification_result, user_location=user.location_primary,
+                        interaction_id=str(interaction.id), db=db
+                    )
+
+                # Tratamento de DUVIDA (perguntas sobre legislação)
+                elif classification == 'DUVIDA':
+                    response_text = await handle_question(
+                        user_id=str(user.id), phone=phone, text=text,
+                        classification=classification_result, user_location=user.location_primary,
+                        db=db
+                    )
+
+                # Outros tipos de mensagem (OUTRO, interrupção de fluxo sem resposta)
+                else:
+                    logger.warning(f"Unrecognized classification or fallback for active user: {classification}")
+                    # Fallback com opções
+                    response_text = await writer.ask_for_help_options()
 
         return WebhookResponse(response=response_text)
 
     except Exception as e:
         logger.error(f"Error processing webhook: {e}", exc_info=True)
-        # Retorna erro genérico mas não derruba o webhook do whatsapp
-        return WebhookResponse(response="Desculpe, tive um erro interno. Tente novamente mais tarde.")
+        # Retorna erro genérico usando WriterAgent
+        return WebhookResponse(response=await writer.generic_error_response())
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host=settings.API_HOST, port=settings.API_PORT, reload=True)
