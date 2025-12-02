@@ -27,6 +27,7 @@ from src.services.demand_flow_v2 import start_demand_flow, process_demand_step, 
 from src.routes.auth import router as auth_router
 from src.routes.user import router as user_router
 from src.routes.demands import router as demands_router
+from src.routes.community import router as community_router
 import uvicorn
 import uuid
 import os
@@ -63,6 +64,7 @@ async def custom_http_exception_handler(request: Request, exc: FastAPIHTTPExcept
 app.include_router(auth_router)
 app.include_router(user_router)
 app.include_router(demands_router)
+app.include_router(community_router)
 
 class WebhookResponse(BaseModel):
     response: str
