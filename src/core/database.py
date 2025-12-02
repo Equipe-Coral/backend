@@ -32,6 +32,7 @@ def init_db():
     from src.models.conversation_state import ConversationState  # noqa
     from src.models.legislative_item import LegislativeItem  # noqa
     from src.models.pl_interaction import PLInteraction  # noqa
+    from src.models.verification_code import VerificationCode  # noqa
 
     # Configure the registry to resolve all relationships
     from sqlalchemy.orm import configure_mappers

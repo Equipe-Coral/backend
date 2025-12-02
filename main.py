@@ -1,4 +1,7 @@
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from src.core.config import settings
@@ -17,6 +20,13 @@ from src.services.demand_handler import handle_problem_confirmation, handle_crea
 from src.services.question_action_handler import handle_question_action_choice
 from src.services.demand_support_handler import handle_demand_support_choice
 from src.services.question_handler import handle_question
+from src.services.demand_investigation_handler import investigation_handler
+# Import V2 Flow (sem IA para textos simples)
+from src.services.demand_flow_v2 import start_demand_flow, process_demand_step, DemandFlowStates
+# Import routers
+from src.routes.auth import router as auth_router
+from src.routes.user import router as user_router
+from src.routes.demands import router as demands_router
 import uvicorn
 import uuid
 import os
@@ -29,6 +39,30 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Coral Bot Backend")
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",  # Vite default port
+        "http://localhost:3000",  # Alternative frontend port
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Standardize error responses to {"message": "..."}
+@app.exception_handler(FastAPIHTTPException)
+async def custom_http_exception_handler(request: Request, exc: FastAPIHTTPException):
+    return JSONResponse(status_code=exc.status_code, content={"message": exc.detail})
+
+# Include routers
+app.include_router(auth_router)
+app.include_router(user_router)
+app.include_router(demands_router)
 
 class WebhookResponse(BaseModel):
     response: str
@@ -161,51 +195,169 @@ async def webhook(
             response_text = None
             
             if current_state:
-                handler_map = {
-                    'drafting_demand': handle_demand_drafting,
-                    'confirming_problem': handle_problem_confirmation,
-                    'asking_create_demand': handle_create_demand_decision,
-                    'choosing_similar_or_new': handle_demand_choice,
-                    'awaiting_demand_choice': handle_demand_choice, # Mantido por compatibilidade
-                    'choosing_demand_action_after_question': handle_question_action_choice,
-                    'choosing_demand_to_support': handle_demand_support_choice,
-                }
+                # NOVO FLUXO V2 (Step-by-step sem IA)
+                v2_states = [
+                    DemandFlowStates.COLLECTING_DESCRIPTION,
+                    DemandFlowStates.COLLECTING_LOCATION,
+                    DemandFlowStates.COLLECTING_CATEGORY,
+                    DemandFlowStates.CONFIRMING
+                ]
                 
-                handler = handler_map.get(current_state.current_stage)
+                if current_state.current_stage in v2_states:
+                    logger.info(f"Handling V2 demand flow: {current_state.current_stage}")
+                    response_text = await process_demand_step(
+                        phone=phone,
+                        text=text,
+                        current_state=current_state.current_stage,
+                        state_context=current_state.context_data,
+                        db=db
+                    )
                 
-                if handler:
-                    logger.info(f"Handling state: {current_state.current_stage}")
+                # Menu de escolha de tipo de ajuda
+                elif current_state.current_stage == 'choosing_help_type':
+                    choice = text.strip()
+                    state_manager = ConversationStateManager()
                     
-                    # Argumentos comuns para todos os handlers
-                    common_args = {
-                        "user_id": str(user.id),
-                        "phone": phone,
-                        "state_context": current_state.context_data,
-                        "db": db
+                    if choice == '1':
+                        # Iniciar fluxo de criação de demanda
+                        logger.info(f"User chose to create demand: {user.id}")
+                        state_manager.clear_state(phone, db)
+                        response_text = await start_demand_flow(phone, db)
+                    
+                    elif choice == '2':
+                        # Ver demandas próximas (TODO: implementar busca por localização)
+                        logger.info(f"User wants to see nearby demands: {user.id}")
+                        state_manager.clear_state(phone, db)
+                        response_text = (
+                            "🔍 *Buscar demandas próximas*\n\n"
+                            "Esta funcionalidade estará disponível em breve!\n\n"
+                            "Por enquanto, você pode:\n"
+                            "• Criar uma nova demanda (digite *1*)\n"
+                            "• Tirar uma dúvida (digite *3*)"
+                        )
+                    
+                    elif choice == '3':
+                        # Tirar dúvida
+                        logger.info(f"User wants to ask question: {user.id}")
+                        state_manager.clear_state(phone, db)
+                        response_text = (
+                            "❓ *Tirar Dúvida*\n\n"
+                            "Faça sua pergunta sobre:\n"
+                            "• Leis municipais ou estaduais\n"
+                            "• Projetos de lei em tramitação\n"
+                            "• Serviços públicos\n"
+                            "• Como funciona a Câmara/Assembleia\n\n"
+                            "Digite sua pergunta:"
+                        )
+                        state_manager.set_state(phone, 'asking_question', {}, db)
+                    
+                    else:
+                        response_text = (
+                            "❌ Opção inválida.\n\n"
+                            "Digite *1*, *2* ou *3*"
+                        )
+                
+                # Estado quando encontrou lei vigente
+                elif current_state.current_stage == 'law_found':
+                    choice = text.strip()
+                    state_manager = ConversationStateManager()
+                    
+                    if choice == '1':
+                        # Criar demanda comunitária mesmo tendo lei
+                        logger.info(f"User chose to create demand despite existing law: {user.id}")
+                        state_manager.clear_state(phone, db)
+                        response_text = await start_demand_flow(phone, db)
+                    
+                    elif choice == '2':
+                        # Orientação completa
+                        logger.info(f"User wants full guidance: {user.id}")
+                        state_manager.clear_state(phone, db)
+                        response_text = (
+                            "📋 *Orientação Completa*\n\n"
+                            "Em breve você terá acesso a:\n"
+                            "• Passo a passo detalhado\n"
+                            "• Modelos de reclamação\n"
+                            "• Contatos dos órgãos\n"
+                            "• Exemplos de sucesso\n\n"
+                            "Por enquanto, use as informações que já te passei para exercer seu direito! 💪"
+                        )
+                    
+                    elif choice == '3':
+                        # Nada por enquanto
+                        logger.info(f"User understood their rights: {user.id}")
+                        state_manager.clear_state(phone, db)
+                        response_text = (
+                            "✅ Perfeito! Agora você conhece seus direitos.\n\n"
+                            "Se precisar de ajuda no futuro, é só me chamar! 💙"
+                        )
+                    
+                    else:
+                        response_text = (
+                            "❌ Opção inválida.\n\n"
+                            "Digite *1*, *2* ou *3*"
+                        )
+                
+                # Estado de pergunta ativa
+                elif current_state.current_stage == 'asking_question':
+                    logger.info(f"Processing user question: {user.id}")
+                    state_manager = ConversationStateManager()
+                    state_manager.clear_state(phone, db)
+                    
+                    # Chamar handler de dúvida
+                    response_text = await handle_question(
+                        user_id=str(user.id), 
+                        phone=phone, 
+                        text=text,
+                        classification=classification_result, 
+                        user_location=user.location_primary,
+                        db=db
+                    )
+                
+                # FLUXO V1 LEGADO (mantido para compatibilidade)
+                else:
+                    handler_map = {
+                        'drafting_demand': handle_demand_drafting,
+                        'confirming_problem': handle_problem_confirmation,
+                        'asking_create_demand': handle_create_demand_decision,
+                        'choosing_similar_or_new': handle_demand_choice,
+                        'awaiting_demand_choice': handle_demand_choice, # Mantido por compatibilidade
+                        'choosing_demand_action_after_question': handle_question_action_choice,
+                        'choosing_demand_to_support': handle_demand_support_choice,
                     }
                     
-                    # Chamada unificada baseada no tipo de input esperado
-                    if current_state.current_stage in ['drafting_demand', 'choosing_similar_or_new', 'awaiting_demand_choice', 'choosing_demand_to_support']:
-                        # Handlers que esperam o input principal como 'text' ou 'choice_text'
-                        response_text = await handler(**common_args, text=text)
-
-                    elif current_state.current_stage == 'confirming_problem':
-                        # Handler que espera 'confirmation_text'
-                        response_text = await handler(**common_args, confirmation_text=text)
-
-                    elif current_state.current_stage == 'asking_create_demand':
-                        # Handler que espera 'decision_text'
-                        response_text = await handler(**common_args, decision_text=text)
-
-                    elif current_state.current_stage == 'choosing_demand_action_after_question':
-                        # Handler que precisa de 'text' e 'user_location'
-                         response_text = await handler(
-                            **common_args,
-                            text=text,
-                            user_location=user.location_primary
-                        )
+                    handler = handler_map.get(current_state.current_stage)
+                    
+                    if handler:
+                        logger.info(f"Handling state: {current_state.current_stage}")
                         
-            # --- PRIORIDADE 2: SEM ESTADO ATIVO OU RESPOSTA PENDENTE ---
+                        # Argumentos comuns para todos os handlers
+                        common_args = {
+                            "user_id": str(user.id),
+                            "phone": phone,
+                            "state_context": current_state.context_data,
+                            "db": db
+                        }
+                        
+                        # Chamada unificada baseada no tipo de input esperado
+                        if current_state.current_stage in ['drafting_demand', 'choosing_similar_or_new', 'awaiting_demand_choice', 'choosing_demand_to_support']:
+                            # Handlers que esperam o input principal como 'text' ou 'choice_text'
+                            response_text = await handler(**common_args, text=text)
+                        
+                        elif current_state.current_stage == 'confirming_problem':
+                            # Handler que espera 'confirmation_text'
+                            response_text = await handler(**common_args, confirmation_text=text)
+
+                        elif current_state.current_stage == 'asking_create_demand':
+                            # Handler que espera 'decision_text'
+                            response_text = await handler(**common_args, decision_text=text)
+
+                        elif current_state.current_stage == 'choosing_demand_action_after_question':
+                            # Handler que precisa de 'text' e 'user_location'
+                            response_text = await handler(
+                                **common_args,
+                                text=text,
+                                user_location=user.location_primary
+                            )            # --- PRIORIDADE 2: SEM ESTADO ATIVO OU RESPOSTA PENDENTE ---
             
             if not response_text:
                 
@@ -216,13 +368,43 @@ async def webhook(
                     logger.info(f"Active user greeting: {user.id}")
                     response_text = await writer.welcome_message(is_new_user=False)
 
-                # Tratamento de DEMANDA (inicia novo fluxo de criação dinâmica)
+                # Tratamento de DEMANDA (mostra opções primeiro)
                 elif classification == 'DEMANDA':
-                    response_text = await handle_demand_creation(
-                        user_id=str(user.id), phone=phone, text=text,
-                        classification=classification_result, user_location=user.location_primary,
-                        interaction_id=str(interaction.id), db=db
+                    logger.info(f"User mentioned a problem: {user.id}")
+                    
+                    # Enviar feedback imediato ao usuário
+                    feedback_message = "🔍 *Aguarde um momento...*\n\nEstou pesquisando leis, projetos e demandas relacionadas ao seu problema."
+                    
+                    # Tentar enviar feedback via WhatsApp (não bloqueia se falhar)
+                    try:
+                        from src.services.whatsapp_service import WhatsAppService
+                        await WhatsAppService.send_message(phone.replace('@c.us', ''), feedback_message)
+                    except Exception as e:
+                        logger.warning(f"Could not send feedback message: {e}")
+                    
+                    # NOVO FLUXO: Investigação completa antes de apresentar opções
+                    response_text = await investigation_handler.investigate_and_present_options(
+                        user_text=text,
+                        classification_result=classification_result,
+                        user_location=user.location_primary,
+                        db=db
                     )
+                    
+                    logger.info(f"Investigation result length: {len(response_text)} chars")
+                    logger.info(f"Investigation result preview: {response_text[:200]}...")
+                    logger.info(f"First char (repr): {repr(response_text[0])} | Starts with 🎯: {response_text.startswith('🎯')}")
+                    
+                    # IMPORTANTE: Salvar contexto SOMENTE se não encontrou lei vigente
+                    # (Lei vigente tem opções diferentes: criar demanda, orientação, nada)
+                    state_manager = ConversationStateManager()
+                    
+                    # Detectar se é resposta de lei vigente (começa com 🎯)
+                    if response_text.startswith("🎯"):
+                        logger.info("Found existing law - setting state: law_found")
+                        state_manager.set_state(phone, 'law_found', {'original_text': text, 'response': response_text}, db)
+                    else:
+                        logger.info("No law found - setting state: choosing_help_type")
+                        state_manager.set_state(phone, 'choosing_help_type', {'original_text': text}, db)
 
                 # Tratamento de DUVIDA (perguntas sobre legislação)
                 elif classification == 'DUVIDA':

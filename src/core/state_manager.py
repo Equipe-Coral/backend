@@ -21,12 +21,18 @@ class ConversationStateManager:
             ConversationState ou None se não existir
         """
         try:
+            # Forçar busca no banco (não usar cache)
+            db.expire_all()
+            
             state = db.query(ConversationState).filter(
                 ConversationState.phone == phone
             ).first()
             
             if state:
+                # Forçar reload dos dados do banco
+                db.refresh(state)
                 logger.info(f"State found for {phone}: {state.current_stage}")
+                logger.debug(f"State context_data: {state.context_data}")
             else:
                 logger.info(f"No state found for {phone}")
                 

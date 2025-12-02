@@ -1,4 +1,5 @@
 import logging
+import json
 from typing import Dict, List, Optional, Any
 from src.core.gemini import gemini_client
 
@@ -203,6 +204,80 @@ class WriterAgent:
             f"Agora ela conta com {new_count} apoios!"
         )
 
+    # =========================================================================
+    # SÍNTESE FORMAL DA DEMANDA (Gemini)
+    # =========================================================================
+    async def synthesize_demand(self, description: str, location: str, category_label: str, urgency: str, scope_label: str) -> Dict[str, Any]:
+        """Gera um título e uma descrição formal/objetiva a partir dos dados coletados.
+
+        Returns dict: {"title": str, "description": str, "affected_entity": Optional[str]}
+        """
+        instr = (
+            "Você é um redator de demandas cívicas. Transforme o relato individual em uma DEMANDA COLETIVA formal.\n\n"
+            "REGRAS CRÍTICAS:\n"
+            "1. TÍTULO (70-90 chars):\n"
+            "   - Tom imperativo e mobilizador (ex: 'Exigimos', 'Solicitamos', 'Demandamos')\n"
+            "   - Foque no problema estrutural, não no caso individual\n"
+            "   - Inclua localização quando relevante\n\n"
+            "2. DESCRIÇÃO (4-7 linhas):\n"
+            "   - Tom FORMAL e GENERALISTA: escreva como manifesto coletivo\n"
+            "   - Use 'comunidade', 'cidadãos', 'moradores' (NUNCA 1ª pessoa)\n"
+            "   - Contextualize o problema como questão social/urbana\n"
+            "   - Mencione impactos coletivos (acessibilidade, direitos, qualidade de vida)\n"
+            "   - Inclua local de forma integrada ao texto\n"
+            "   - Termine com call-to-action ou expectativa de mudança\n\n"
+            "3. AFFECTED_ENTITY: órgão/empresa responsável (se identificável) ou null\n\n"
+            "RESPONDA APENAS JSON:\n"
+            '{"title": "...", "description": "...", "affected_entity": "..."}\n'
+        )
+
+        ctx = {
+            "description": description,
+            "location": location,
+            "category": category_label,
+            "urgency": urgency,
+            "scope": scope_label,
+        }
+
+        raw = await self._generate(instr, ctx)
+        logger.info(f"🤖 Gemini raw synthesis response: {raw[:300]}...")
+
+        # Tentativa de parse com limpeza
+        try:
+            # Extrair JSON se vier com texto extra (markdown, etc)
+            json_start = raw.find('{')
+            json_end = raw.rfind('}') + 1
+            if json_start >= 0 and json_end > json_start:
+                json_str = raw[json_start:json_end]
+                data = json.loads(json_str)
+            else:
+                data = json.loads(raw)
+            
+            title = str(data.get("title") or "").strip()
+            desc = str(data.get("description") or "").strip()
+            affected = data.get("affected_entity")
+            if affected is not None:
+                affected = str(affected).strip() or None
+            
+            # Validação crítica: se título ou descrição estão vazios, usar fallback
+            if not title or len(title) < 10:
+                logger.warning(f"⚠️ Synthesis returned invalid title: '{title}'. Using fallback.")
+                title = (description or "Demanda").strip()[:90]
+            
+            if not desc or len(desc) < 20:
+                logger.warning(f"⚠️ Synthesis returned invalid description: '{desc}'. Using fallback.")
+                desc = f"{description}\n\nLocal: {location}".strip()
+            
+            logger.info(f"✅ Synthesis successful - Title: '{title[:60]}...', Desc: '{desc[:80]}...'")
+        except Exception as e:
+            # Fallback simples
+            logger.warning(f"⚠️ Synthesis JSON parse failed: {e}")
+            title = (description or "Demanda").strip()[:90]
+            desc = f"{description}\n\nLocal: {location}".strip()
+            affected = None
+
+        return {"title": title, "description": desc, "affected_entity": affected}
+
     async def generic_error_response(self) -> str:
         return "Ops! Tive um erro interno ao processar seu pedido. Tente novamente em alguns instantes."
 
@@ -212,10 +287,12 @@ class WriterAgent:
 
     async def ask_for_help_options(self) -> str:
         return (
-            "Não entendi muito bem. 😕\n\n"
-            "Você pode:\n"
-            "1. Relatar um problema\n"
-            "2. Tirar uma dúvida sobre leis"
+            "Hmm, não entendi muito bem o que você precisa. 😕\n\n"
+            "*Como posso ajudar?*\n\n"
+            "📋 *Relatar um problema* - Denuncie algo que precisa ser resolvido na sua cidade\n"
+            "❓ *Tirar dúvida sobre leis* - Pergunte sobre legislação ou serviços públicos\n"
+            "📱 *Ver minhas demandas* - Acompanhe os problemas que você relatou\n\n"
+            "Digite o que você gostaria de fazer!"
         )
 
     # =========================================================================

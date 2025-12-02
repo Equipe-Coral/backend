@@ -24,11 +24,45 @@ class ProfilerAgent:
     async def check_user_exists(self, phone: str, db: Session) -> Optional[User]:
         """Verifica se usuário já existe no banco de dados"""
         try:
-            user = db.query(User).filter(User.phone == phone).first()
+            # Normalize phone number: remove '55' prefix and '@c.us' suffix if present
+            
+            normalized_phone = phone
+            
+            # Remove suffix
+            if "@" in normalized_phone:
+                normalized_phone = normalized_phone.split("@")[0]
+            
+            # Remove DDI (55) if present
+            if normalized_phone.startswith("55"):
+                # Check if it's a valid DDI 55 (Brazil) number length
+                # Min length without DDI: 10 (DDD + 8 digits) -> Total 12
+                # Max length without DDI: 11 (DDD + 9 digits) -> Total 13
+                if len(normalized_phone) >= 12:
+                    normalized_phone = normalized_phone[2:]
+                
+            logger.info(f"Checking user existence for phone: {phone} (Normalized: {normalized_phone})")
+            
+            # Try exact match first
+            user = db.query(User).filter(User.phone == normalized_phone).first()
+            
+            # If not found, try alternative formats (handling the 9th digit)
+            if not user:
+                if len(normalized_phone) == 10: # DDD + 8 digits (Missing 9)
+                    # Try adding 9: DDD + 9 + 8 digits
+                    alternative_phone = f"{normalized_phone[:2]}9{normalized_phone[2:]}"
+                    logger.info(f"Trying alternative phone (add 9): {alternative_phone}")
+                    user = db.query(User).filter(User.phone == alternative_phone).first()
+                    
+                elif len(normalized_phone) == 11: # DDD + 9 + 8 digits
+                    # Try removing 9: DDD + 8 digits
+                    alternative_phone = f"{normalized_phone[:2]}{normalized_phone[3:]}"
+                    logger.info(f"Trying alternative phone (remove 9): {alternative_phone}")
+                    user = db.query(User).filter(User.phone == alternative_phone).first()
+
             if user:
-                logger.info(f"✅ User FOUND: {phone} | ID: {user.id} | Status: {user.status}")
+                logger.info(f"✅ User FOUND: {user.phone} | ID: {user.id} | Status: {user.status}")
             else:
-                logger.info(f"🆕 NEW user: {phone}")
+                logger.info(f"🆕 NEW user: {normalized_phone}")
             return user
         except Exception as e:
             logger.error(f"❌ Error checking user existence: {e}")
@@ -43,17 +77,21 @@ class ProfilerAgent:
     async def extract_location_from_text(self, text: str) -> Dict:
         """
         Usa Gemini para extrair localização do texto do usuário.
-        
-        Retorna:
-            {
-                "has_location": bool,
-                "neighborhood": str | None,
-                "city": str | None,
-                "state": str | None,
-                "full_address": str | None,
-                "confidence": float (0.0 to 1.0)
-            }
         """
+        # Fallback simples se a API falhar (ex: Quota Exceeded)
+        # Tenta extrair cidade/estado básico se o texto for curto e parecer um local
+        if len(text.split()) <= 5 and "," in text:
+            parts = text.split(",")
+            if len(parts) >= 2:
+                return {
+                    "has_location": True,
+                    "neighborhood": parts[0].strip(),
+                    "city": parts[1].strip(),
+                    "state": "SP", # Default heurístico
+                    "full_address": text,
+                    "confidence": 0.8
+                }
+
         prompt = f"""Extraia informações de localização do texto do usuário brasileiro.
 
 Retorne APENAS um JSON válido no seguinte formato (sem markdown, sem texto adicional):
@@ -201,11 +239,18 @@ JSON:"""
             User object criado
         """
         try:
+            # Normalize phone number for storage
+            normalized_phone = phone
+            if "@" in normalized_phone:
+                normalized_phone = normalized_phone.split("@")[0]
+            if normalized_phone.startswith("55") and len(normalized_phone) > 11:
+                normalized_phone = normalized_phone[2:]
+
             # Generate Civic ID (for future use)
-            civic_id = self.generate_civic_id_hash(phone)
+            civic_id = self.generate_civic_id_hash(normalized_phone)
             
             user = User(
-                phone=phone,
+                phone=normalized_phone,
                 location_primary=location_data,
                 status='active'
             )

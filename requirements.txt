@@ -15,3 +15,8 @@ geopy
 google-genai
 pgvector
 httpx
+python-jose[cryptography]
+bcrypt
+pydantic[email]
+aiohttp
+jose
